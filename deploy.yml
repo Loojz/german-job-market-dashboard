@@ -1,0 +1,64 @@
+name: Datenpipeline & Deployment
+
+on:
+  push:
+    branches: [main]
+  schedule:
+    - cron: "0 6 * * 1"   # Jeden Montag 06:00 UTC
+  workflow_dispatch:        # Jederzeit manuell auslösbar
+
+jobs:
+  # ──────────────────────────────────────────
+  # 1. Daten aktualisieren (nur bei Schedule)
+  # ──────────────────────────────────────────
+  update-data:
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - run: pip install -r requirements.txt
+
+      - name: Pipeline ausführen
+        env:
+          GENESIS_USER:     ${{ secrets.GENESIS_USER }}
+          GENESIS_PASSWORD: ${{ secrets.GENESIS_PASSWORD }}
+        run: python -c "from src.pipeline import run_full_update; run_full_update()"
+
+      - name: Parquets committen
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add data/processed/*.parquet
+          git diff --staged --quiet || \
+            git commit -m "data: Pipeline-Update $(date -u +'%Y-%m-%d')" && git push
+
+  # ──────────────────────────────────────────
+  # 2. Zu Hugging Face Spaces spiegeln
+  # ──────────────────────────────────────────
+  sync-to-hf:
+    runs-on: ubuntu-latest
+    # Läuft nach update-data (falls dieser Job existiert), sonst direkt
+    needs: []
+    if: always()
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Push to Hugging Face Spaces
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          # ↓ Diese beiden Variablen als GitHub Repository Variables setzen:
+          HF_USER:  ${{ vars.HF_USERNAME }}
+          HF_SPACE: ${{ vars.HF_SPACE_NAME }}
+        run: |
+          git remote add hf "https://${HF_USER}:${HF_TOKEN}@huggingface.co/spaces/${HF_USER}/${HF_SPACE}"
+          git push hf main --force

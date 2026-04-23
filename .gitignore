@@ -1,0 +1,38 @@
+# ─── Zugangsdaten – NIEMALS committen ───────────────────────
+.env
+
+# ─── Python ──────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*.pyo
+.venv/
+venv/
+env/
+*.egg-info/
+.Python
+
+# ─── Streamlit ───────────────────────────────────────────────
+.streamlit/secrets.toml
+
+# ─── DuckDB (wird on-the-fly erzeugt) ────────────────────────
+*.duckdb
+*.duckdb.wal
+
+# ─── Betriebssystem ──────────────────────────────────────────
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# ─── IDE ─────────────────────────────────────────────────────
+.idea/
+.vscode/
+*.iml
+
+# ─── Parquet-Dateien: COMMITTEN (HF Space braucht sie) ───────
+# data/processed/   ← auskommentiert, damit Parquets ins Repo kommen
+
+# ─── Rohdaten (groß, nicht nötig) ────────────────────────────
+data/raw/
+
+# ─── Logs ────────────────────────────────────────────────────
+*.log
