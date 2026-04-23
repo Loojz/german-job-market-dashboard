@@ -153,12 +153,11 @@ if "Überblick" in seite:
     # KPI-Zeile
     k1, k2, k3, k4 = st.columns(4)
     bund_al    = int(snap["arbeitslose_gesamt"].sum())
-    bund_quote = round(snap["arbeitslosenquote"].dropna().mean(), 1)
-    if pd.isna(bund_quote):
-        # Näherung aus Absolutzahlen
-        bund_quote = round(
-            snap["arbeitslose_gesamt"].sum() / snap["beschaeftigte_gesamt"].sum() * 100, 1
-        )
+    quote_mean = snap["arbeitslosenquote"].dropna().mean()
+    if pd.isna(quote_mean):
+        quote_mean = snap["arbeitslose_gesamt"].sum() / (
+                    snap["beschaeftigte_gesamt"].sum() + snap["arbeitslose_gesamt"].sum()) * 100
+    bund_quote = round(float(quote_mean), 1)
     bund_be    = snap["beschaeftigte_gesamt"].sum()
     ml_aktuell = float(ml.iloc[-1]["betrag"])
 
