@@ -36,3 +36,7 @@ data/raw/
 
 # ─── Logs ────────────────────────────────────────────────────
 *.log
+entgelt-*.xlsx
+entgelt-*.xlsm
+entgelt-*.xls
+data/processed/entgelt_kreise.parquet
