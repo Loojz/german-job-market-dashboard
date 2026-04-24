@@ -10,45 +10,35 @@ import plotly.graph_objects as go
 
 # ─── Design-System ───────────────────────────────────────────────────────────
 _FONT   = "Inter, system-ui, sans-serif"
-_GRID   = "#e0e0e0"
+_GRID   = "#f0f0f0"
 _COLORS = px.colors.qualitative.Plotly
 
 _BASE_LAYOUT = dict(
-    font=dict(family=_FONT, size=13, color="#222222"),
+    font=dict(family=_FONT, size=13),
     plot_bgcolor="white",
-    paper_bgcolor="rgba(0,0,0,0)",
+    paper_bgcolor="white",
     margin=dict(l=55, r=25, t=50, b=50),
     hovermode="x unified",
     legend=dict(
         orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1,
-        bgcolor="rgba(255,255,255,0.9)", bordercolor="#ccc", borderwidth=1,
-        font=dict(color="#222"),
+        bgcolor="rgba(255,255,255,0.9)", bordercolor="#e0e0e0", borderwidth=1,
     ),
 )
 
 # Karten-Layout ohne margin (wird separat gesetzt)
 _BASE_LAYOUT_NO_MARGIN = {k: v for k, v in _BASE_LAYOUT.items() if k != "margin"}
 
-_MINDESTLOHN_LINE = dict(color="rgba(200, 70, 0, 0.8)", width=1.5, dash="dot")
+_MINDESTLOHN_LINE = dict(color="rgba(220, 90, 20, 0.6)", width=1.2, dash="dot")
 
 
 def _layout(fig: go.Figure, title: str = "", ylabel: str = "") -> go.Figure:
     fig.update_layout(
         **_BASE_LAYOUT,
-        title=dict(text=title, font=dict(size=14, color="#111"), x=0),
-        xaxis=dict(
-            showgrid=True, gridcolor=_GRID, gridwidth=1,
-            linecolor="#555", linewidth=1.5, zeroline=False,
-            tickfont=dict(size=12, color="#333"),
-            title_font=dict(size=13, color="#333"),
-        ),
+        title=dict(text=title, font=dict(size=14, color="#2d2d2d"), x=0),
+        xaxis=dict(showgrid=True, gridcolor=_GRID, linecolor="#ccc", zeroline=False),
         yaxis=dict(
-            title=ylabel,
-            showgrid=True, gridcolor=_GRID, gridwidth=1,
-            linecolor="#555", linewidth=1.5, zeroline=False,
-            tickformat=",d",
-            tickfont=dict(size=12, color="#333"),
-            title_font=dict(size=13, color="#333"),
+            title=ylabel, showgrid=True, gridcolor=_GRID,
+            linecolor="#ccc", zeroline=False, tickformat=",d",
         ),
     )
     return fig
@@ -118,25 +108,12 @@ def chart_yoy(df: pd.DataFrame, titel: str = "Vorjahresveränderung (%)") -> go.
 def chart_beschaeftigung_stack(df: pd.DataFrame, bundesland: str = "") -> go.Figure:
     if bundesland:
         df = df[df["bundesland"] == bundesland]
-
-    # Kompatibel mit alter und neuer Spaltenstruktur
-    if "beschaeftigte_svb" in df.columns:
-        col1, label1 = "beschaeftigte_svb", "Sozialversicherungspflichtig"
-        col2, label2 = "beschaeftigte_geringfuegig", "Geringfügig beschäftigt"
-    else:
-        col1, label1 = "beschaeftigte_gesamt", "Beschäftigte gesamt"
-        col2, label2 = None, None
-
-    agg_cols = [c for c in [col1, col2] if c and c in df.columns]
-    agg = df.groupby("datum")[agg_cols].sum().reset_index()
-
+    agg = df.groupby("datum")[["beschaeftigte_vz", "beschaeftigte_tz"]].sum().reset_index()
     fig = go.Figure()
-    fig.add_trace(go.Bar(x=agg["datum"], y=agg[col1],
-                         name=label1, marker_color="#1f77b4"))
-    if col2 and col2 in agg.columns:
-        fig.add_trace(go.Bar(x=agg["datum"], y=agg[col2],
-                             name=label2, marker_color="#aec7e8"))
-
+    fig.add_trace(go.Bar(x=agg["datum"], y=agg["beschaeftigte_vz"],
+                         name="Vollzeit", marker_color="#1f77b4"))
+    fig.add_trace(go.Bar(x=agg["datum"], y=agg["beschaeftigte_tz"],
+                         name="Teilzeit", marker_color="#aec7e8"))
     fig.update_layout(
         **_BASE_LAYOUT,
         barmode="stack",
@@ -200,14 +177,6 @@ def chart_karte(
     label = _mlabels.get(metrik, metrik)
     geo   = _geojson()
 
-    # Sicherstellen dass Quote-Werte vorhanden sind
-    df = df.copy()
-    if "arbeitslosenquote" in df.columns and df["arbeitslosenquote"].isna().all():
-        df["arbeitslosenquote"] = (
-            df["arbeitslose_gesamt"] /
-            (df["beschaeftigte_gesamt"] + df["arbeitslose_gesamt"]) * 100
-        ).round(1)
-
     # Fallback: Balken-Chart wenn GeoJSON nicht ladbar
     if not geo:
         fig = px.bar(
@@ -218,35 +187,26 @@ def chart_karte(
         )
         return _layout(fig, titel or label)
 
-    # Hover-Template manuell definieren (vermeidet Plotly-Syntax-Fehler)
+    # Hover-Felder je nach Metrik
+    hover = {"bundesland": True, "arbeitslose_gesamt": ":,d"}
+    if "arbeitslosenquote" in df.columns:
+        hover["arbeitslosenquote"] = ":.1f"
+
     fig = px.choropleth(
         df, geojson=geo,
         locations="bundesland", featureidkey="properties.name",
-        color=metrik,
-        color_continuous_scale=[
-            [0.0, "#f7fbff"],
-            [0.2, "#c6dbef"],
-            [0.4, "#6baed6"],
-            [0.6, "#2171b5"],
-            [0.8, "#084594"],
-            [1.0, "#08306b"],
-        ],
+        color=metrik, color_continuous_scale="Blues_r",
         labels={metrik: label},
-        custom_data=["bundesland", "arbeitslose_gesamt", "arbeitslosenquote"],
-    )
-    fig.update_traces(
-        hovertemplate=(
-            "<b>%{customdata[0]}</b><br>"
-            "Arbeitslose: %{customdata[1]:,.0f}<br>"
-            "AL-Quote: %{customdata[2]:.1f} %<extra></extra>"
-        )
+        hover_data=hover,
     )
     fig.update_geos(fitbounds="locations", visible=False)
+
+    # _BASE_LAYOUT_NO_MARGIN verwenden um doppelten margin-Key zu vermeiden
     fig.update_layout(
         **_BASE_LAYOUT_NO_MARGIN,
         margin=dict(l=0, r=0, t=50, b=0),
         title=dict(text=titel or label, font=dict(size=14), x=0),
-        geo=dict(bgcolor="rgba(0,0,0,0)"),
+        geo=dict(bgcolor="white"),
         coloraxis_colorbar=dict(title=label, len=0.55),
     )
     return fig
@@ -273,11 +233,16 @@ def chart_mindestlohn(ml_df: pd.DataFrame) -> go.Figure:
 # ─── 6. Ranking-Tabelle ──────────────────────────────────────────────────────
 
 def format_ranking(df: pd.DataFrame) -> pd.DataFrame:
-    # arbeitslosenquote kommt aus queries.py berechnet (AL / (SVB + AL) * 100)
+    # Arbeitslosenquote berechnen falls nan
+    if df["arbeitslosenquote"].isna().all():
+        df = df.copy()
+        df["arbeitslosenquote"] = (
+            df["arbeitslose_gesamt"] / (df["beschaeftigte_gesamt"] * 1.15) * 100
+        ).round(1)
+
     out = df[["bundesland", "datum", "arbeitslosenquote",
               "arbeitslose_gesamt", "beschaeftigte_gesamt"]].copy()
-    out.columns = ["Bundesland", "Stand", "AL-Quote (%)*",
-                   "Arbeitslose", "Beschäftigte (svpfl.)"]
+    out.columns = ["Bundesland", "Stand", "AL-Quote (%)", "Arbeitslose", "Beschäftigte (svpfl.)"]
     out["Stand"]    = out["Stand"].dt.strftime("%m/%Y")
     out["Arbeitslose"] = out["Arbeitslose"].apply(
         lambda x: f"{x:,.0f}".replace(",", ".")

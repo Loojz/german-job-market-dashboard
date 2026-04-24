@@ -2,23 +2,30 @@
 Datenpipeline: Arbeitsmarkt-Dashboard Deutschland
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-DATENQUELLEN:
+DATENQUELLEN (alle offiziell, keine Schätzungen):
 
 1. BA-Statistik API (kostenlos, keine Registrierung)
-   Doku: statistik.arbeitsagentur.de → Service → API
-   → Arbeitslosigkeit Zeitreihe nach Bundesland (EckwerteZeitreiheALOBL)
-   → Beschäftigung Zeitreihe nach Bundesland   (EckwerteZeitreiheBSTBL)
+   → Arbeitslosigkeit + Unterbeschäftigung nach Bundesland (EckwerteZeitreiheALOBL)
+   → Beschäftigung nach Bundesland (EckwerteZeitreiheBSTBL)
 
-2. GENESIS-API (Destatis)
-   Token aus .env: GENESIS_USERNAME
-   Registrierung: www-genesis.destatis.de → Mein GENESIS → Webservice
+2. GENESIS-API (Destatis) — Token aus .env: GENESIS_USERNAME
    → Erwerbstätige nach Bundesland, jährlich (Tabelle 13311-0002)
 
-3. Mindestlohn (hartkodiert, Quelle: Mindestlohnkommission)
+3. BA-Entgeltstatistik Excel (lokale Dateien, Stichtag 31.12.)
+   → Median-Bruttoentgelt nach Kreis, Geschlecht, Alter, Nationalität
+   → Sheet 8.2 (xlsx, Zeitreihe 2020–2024) + Sheet 16.2 (xlsm, 2015–2019)
+   → Quelle: statistik.arbeitsagentur.de → Entgelt
+
+4. Mindestlohn (hartkodiert aus amtlichen MiLoKo-Beschlüssen)
+   → Quelle: mindestlohn-kommission.de
+
+HINWEIS: Keine Schätzfaktoren oder Näherungswerte.
+Alle Spalten kommen direkt aus offiziellen Quellen.
 """
 
 import io
 import os
+import re
 import time
 import logging
 import zipfile
@@ -56,6 +63,15 @@ BA_BL_CODES = {
     "Mecklenburg-Vorpommern": "13", "Sachsen": "14",
     "Sachsen-Anhalt": "15", "Thüringen": "16",
 }
+BL_MAP = {
+    "01": "Schleswig-Holstein", "02": "Hamburg", "03": "Niedersachsen",
+    "04": "Bremen", "05": "Nordrhein-Westfalen", "06": "Hessen",
+    "07": "Rheinland-Pfalz", "08": "Baden-Württemberg", "09": "Bayern",
+    "10": "Saarland", "11": "Berlin", "12": "Brandenburg",
+    "13": "Mecklenburg-Vorpommern", "14": "Sachsen", "15": "Sachsen-Anhalt",
+    "16": "Thüringen",
+}
+
 
 # ═══════════════════════════════════════════════════════════
 # 1. BA-STATISTIK API
@@ -66,16 +82,13 @@ BA_HEADERS  = {"User-Agent": "ArbeitsmarktDashboard/1.0 (THWS Uni-Projekt)"}
 
 
 def _fetch_ba_csv(table: str, params: dict, retries: int = 3) -> pd.DataFrame:
-    """
-    BA-API: CSV abrufen mit Retry-Logik.
-    BA-CSV-Format: erste Zeilen Metadaten, dann Header 'Berichtsmonat;...'
-    """
+    """BA-API: CSV abrufen mit Retry-Logik."""
     url = f"{BA_API_BASE}/{table}"
     for attempt in range(retries):
         try:
             r = requests.get(url, params=params, headers=BA_HEADERS, timeout=60)
             if r.status_code == 404:
-                raise FileNotFoundError(f"BA-API: Tabelle '{table}' nicht gefunden (404)")
+                raise FileNotFoundError(f"BA-API: Tabelle '{table}' nicht gefunden")
             r.raise_for_status()
             break
         except (requests.Timeout, requests.ConnectionError) as e:
@@ -87,13 +100,10 @@ def _fetch_ba_csv(table: str, params: dict, retries: int = 3) -> pd.DataFrame:
                 raise
 
     lines = r.text.splitlines()
-
-    # Header-Zeile finden: erste Zeile mit "Berichtsmonat"
     header_idx = next((i for i, l in enumerate(lines) if "Berichtsmonat" in l), None)
     if header_idx is None:
         raise ValueError(f"Keine Header-Zeile gefunden.\nErste 400 Zeichen: {r.text[:400]}")
 
-    # Nur Zeilen mit Semikolon (Datenzeilen), Metadaten-/Hinweis-Zeilen raus
     data_lines = [lines[header_idx]] + [
         l for l in lines[header_idx + 1:] if ";" in l and l.strip()
     ]
@@ -107,7 +117,12 @@ def _fetch_ba_csv(table: str, params: dict, retries: int = 3) -> pd.DataFrame:
 
 
 def fetch_ba_arbeitslose() -> pd.DataFrame:
-    """Arbeitslosigkeit Zeitreihe nach Bundesland (BA-API EckwerteZeitreiheALOBL)."""
+    """
+    Arbeitslosigkeit + Unterbeschäftigung nach Bundesland.
+    Quelle: BA-API EckwerteZeitreiheALOBL
+    Spalten: Arbeitslose, Arbeitslose saisonbereinigt,
+             Unterbeschäftigung, Unterbeschäftigung saisonbereinigt
+    """
     log.info("BA-API: Arbeitslosenzahlen nach Bundesland …")
     records = []
 
@@ -118,41 +133,41 @@ def fetch_ba_arbeitslose() -> pd.DataFrame:
                 {"1|Bundesland_BEAB": bl, "Bundesland": bl}
             )
             datum_col = next(
-                (c for c in df.columns if "monat" in c.lower() or "datum" in c.lower()), None
+                (c for c in df.columns if "monat" in c.lower()), None
             )
-            alo_col = next(
-                (c for c in df.columns if c.strip() == "Arbeitslose"), None
-            ) or next(
-                (c for c in df.columns if "arbeitslose" in c.lower()
-                 and "quote" not in c.lower()), None
-            )
-            quote_col = next(
-                (c for c in df.columns if "arbeitslosenquote" in c.lower()), None
-            )
+            # Exakte Spaltennamen aus der API
+            alo_col   = next((c for c in df.columns if c.strip() == "Arbeitslose"), None)
+            alo_sb    = next((c for c in df.columns if "saisonbereinigt" in c.lower()
+                              and "unterbeschäftigung" not in c.lower()), None)
+            ub_col    = next((c for c in df.columns if "unterbeschäftigung" in c.lower()
+                              and "saison" not in c.lower()), None)
+            ub_sb     = next((c for c in df.columns if "unterbeschäftigung" in c.lower()
+                              and "saisonbereinigt" in c.lower()), None)
 
             if datum_col is None or alo_col is None:
-                log.warning(f"  {bl}: Spalten nicht erkannt. Verfügbar: {list(df.columns)}")
+                log.warning(f"  {bl}: Spalten nicht erkannt: {list(df.columns)}")
                 continue
 
             for _, row in df.iterrows():
                 datum = pd.to_datetime(str(row[datum_col]), format="%B %Y", errors="coerce")
                 if pd.isna(datum):
                     datum = pd.to_datetime(str(row[datum_col]), errors="coerce")
-                alo = pd.to_numeric(
-                    str(row[alo_col]).replace(".", "").replace(",", "."), errors="coerce"
-                )
-                quote = pd.to_numeric(
-                    str(row[quote_col]).replace(",", "."), errors="coerce"
-                ) if quote_col else None
-
+                alo = pd.to_numeric(str(row[alo_col]).replace(".", "").replace(",", "."), errors="coerce")
                 if pd.notna(datum) and pd.notna(alo):
-                    records.append({
-                        "datum":              datum,
-                        "bundesland":         bl,
-                        "bl_code":            BA_BL_CODES[bl],
-                        "arbeitslose_gesamt": int(alo),
-                        "arbeitslosenquote":  float(quote) if quote is not None and pd.notna(quote) else None,
-                    })
+                    def safe_int(val):
+                        v = pd.to_numeric(str(val).replace(".", "").replace(",", "."), errors="coerce")
+                        return int(v) if pd.notna(v) else None
+
+                    rec = {
+                        "datum":                      datum,
+                        "bundesland":                 bl,
+                        "bl_code":                    BA_BL_CODES[bl],
+                        "arbeitslose_gesamt":          int(alo),
+                        "arbeitslose_saisonbereinigt": safe_int(row[alo_sb]) if alo_sb else None,
+                        "unterbeschaeftigung":         safe_int(row[ub_col])  if ub_col  else None,
+                        "unterbeschaeftigung_sb":      safe_int(row[ub_sb])   if ub_sb   else None,
+                    }
+                    records.append(rec)
             time.sleep(1.0)
 
         except Exception as e:
@@ -163,18 +178,19 @@ def fetch_ba_arbeitslose() -> pd.DataFrame:
         raise RuntimeError("BA-API: Keine Arbeitslosendaten erhalten.")
 
     df_out = pd.DataFrame(records)
-    df_out["arbeitslose_u25"]     = (df_out["arbeitslose_gesamt"] * 0.10).astype(int)
-    df_out["arbeitslose_ausl"]    = (df_out["arbeitslose_gesamt"] * 0.31).astype(int)
-    df_out["arbeitslose_maenner"] = (df_out["arbeitslose_gesamt"] * 0.54).astype(int)
-    df_out["arbeitslose_frauen"]  = (df_out["arbeitslose_gesamt"] * 0.46).astype(int)
-    df_out["quelle"]              = "BA-Statistik-API"
-    df_out["abgerufen_am"]        = date.today().isoformat()
+    df_out["quelle"]      = "BA-Statistik-API (EckwerteZeitreiheALOBL)"
+    df_out["abgerufen_am"] = date.today().isoformat()
     log.info(f"  ✓ {len(df_out):,} Zeilen, {df_out['bundesland'].nunique()} Bundesländer")
     return df_out
 
 
 def fetch_ba_beschaeftigung() -> pd.DataFrame:
-    """Beschäftigung Zeitreihe nach Bundesland (BA-API EckwerteZeitreiheBSTBL)."""
+    """
+    Beschäftigung nach Bundesland.
+    Quelle: BA-API EckwerteZeitreiheBSTBL
+    Spalten: Beschäftigte (gesamt), SVB, SVB saisonbereinigt,
+             geringfügig Beschäftigte
+    """
     log.info("BA-API: Beschäftigung nach Bundesland …")
     records = []
 
@@ -185,37 +201,43 @@ def fetch_ba_beschaeftigung() -> pd.DataFrame:
                 {"1|Bundesland_BEAB": bl, "Bundesland AO": bl}
             )
             datum_col = next(
-                (c for c in df.columns if "monat" in c.lower() or "datum" in c.lower()), None
+                (c for c in df.columns if "monat" in c.lower()), None
             )
-            # SVB-Spalte (nicht saisonbereinigt)
-            svb_col = next(
-                (c for c in df.columns
-                 if "sozialversicherungspflichtig beschäftigte" in c.lower()
-                 and "saison" not in c.lower()), None
-            )
-            # Fallback: Gesamtbeschäftigte
-            be_col = next(
-                (c for c in df.columns if c.strip() == "Beschäftigte"), None
-            )
-            val_col = svb_col or be_col
+            # Exakte Spaltennamen aus der API
+            be_col  = next((c for c in df.columns if c.strip() == "Beschäftigte"), None)
+            svb_col = next((c for c in df.columns
+                            if "sozialversicherungspflichtig beschäftigte" in c.lower()
+                            and "saison" not in c.lower()), None)
+            svb_sb  = next((c for c in df.columns
+                            if "sozialversicherungspflichtig beschäftigte" in c.lower()
+                            and "saisonbereinigt" in c.lower()), None)
+            gfb_col = next((c for c in df.columns
+                            if "geringfügig" in c.lower()), None)
 
-            if datum_col is None or val_col is None:
-                log.warning(f"  {bl}: Spalten nicht erkannt. Verfügbar: {list(df.columns)}")
+            if datum_col is None or (be_col is None and svb_col is None):
+                log.warning(f"  {bl}: Spalten nicht erkannt: {list(df.columns)}")
                 continue
 
             for _, row in df.iterrows():
                 datum = pd.to_datetime(str(row[datum_col]), format="%B %Y", errors="coerce")
                 if pd.isna(datum):
                     datum = pd.to_datetime(str(row[datum_col]), errors="coerce")
-                be = pd.to_numeric(
-                    str(row[val_col]).replace(".", "").replace(",", "."), errors="coerce"
-                )
-                if pd.notna(datum) and pd.notna(be):
+                be  = pd.to_numeric(str(row[be_col]).replace(".", ""), errors="coerce") if be_col else None
+                svb = pd.to_numeric(str(row[svb_col]).replace(".", ""), errors="coerce") if svb_col else None
+
+                if pd.notna(datum) and (pd.notna(be) or pd.notna(svb)):
+                    def safe_int(val):
+                        v = pd.to_numeric(str(val).replace(".", "").replace(",", "."), errors="coerce")
+                        return int(v) if pd.notna(v) else None
+
                     records.append({
-                        "datum":                datum,
-                        "bundesland":           bl,
-                        "bl_code":              BA_BL_CODES[bl],
-                        "beschaeftigte_gesamt": int(be),
+                        "datum":                     datum,
+                        "bundesland":                bl,
+                        "bl_code":                   BA_BL_CODES[bl],
+                        "beschaeftigte_gesamt":       safe_int(row[be_col])  if be_col  else None,
+                        "beschaeftigte_svb":          safe_int(row[svb_col]) if svb_col else None,
+                        "beschaeftigte_svb_sb":       safe_int(row[svb_sb])  if svb_sb  else None,
+                        "beschaeftigte_geringfuegig": safe_int(row[gfb_col]) if gfb_col else None,
                     })
             time.sleep(1.0)
 
@@ -227,17 +249,14 @@ def fetch_ba_beschaeftigung() -> pd.DataFrame:
         raise RuntimeError("BA-API: Keine Beschäftigungsdaten erhalten.")
 
     df_out = pd.DataFrame(records)
-    df_out["beschaeftigte_vz"] = (df_out["beschaeftigte_gesamt"] * 0.65).astype(int)
-    df_out["beschaeftigte_tz"] = (df_out["beschaeftigte_gesamt"] * 0.35).astype(int)
-    df_out["quelle"]           = "BA-Statistik-API"
-    df_out["abgerufen_am"]     = date.today().isoformat()
+    df_out["quelle"]       = "BA-Statistik-API (EckwerteZeitreiheBSTBL)"
+    df_out["abgerufen_am"] = date.today().isoformat()
     log.info(f"  ✓ {len(df_out):,} Zeilen, {df_out['bundesland'].nunique()} Bundesländer")
     return df_out
 
 
 # ═══════════════════════════════════════════════════════════
 # 2. GENESIS-API (Destatis)
-# POST mit Token im HTTP-Header (seit 30. Juni 2025)
 # ═══════════════════════════════════════════════════════════
 
 GENESIS_BASE = "https://www-genesis.destatis.de/genesisWS/rest/2020"
@@ -259,12 +278,10 @@ def _genesis_headers() -> dict:
 
 def fetch_genesis_erwerbstaetige() -> pd.DataFrame:
     """
-    Erwerbstätige nach Bundesland, jährlich.
-    GENESIS Tabelle 13311-0002 (Länderberechnung, Bundesländer, Jahre).
-    Format: ffcsv (tidy CSV, gezippt geliefert).
+    Erwerbstätige nach Bundesland, jährlich (VGR-Konzept).
+    GENESIS Tabelle 13311-0002, Format ffcsv (gezippt).
     """
     log.info("GENESIS: Erwerbstätige abrufen …")
-
     r = requests.post(
         f"{GENESIS_BASE}/data/tablefile",
         headers=_genesis_headers(),
@@ -281,38 +298,47 @@ def fetch_genesis_erwerbstaetige() -> pd.DataFrame:
     )
     r.raise_for_status()
 
-    # GENESIS liefert ffcsv immer als ZIP (laut offizieller Doku Mai 2025)
     try:
         zf       = zipfile.ZipFile(io.BytesIO(r.content))
         csv_file = zf.open(zf.namelist()[0])
     except zipfile.BadZipFile:
         try:
             err = r.json()
-            raise ValueError(f"GENESIS Fehler: {err.get('Status', {}).get('Content', r.text[:300])}")
+            raise ValueError(f"GENESIS: {err.get('Status', {}).get('Content', r.text[:300])}")
         except Exception:
             raise ValueError(f"GENESIS: Unerwartete Antwort: {r.text[:300]}")
 
     df = pd.read_csv(
-        csv_file,
-        delimiter=";",
-        decimal=",",
+        csv_file, delimiter=";", decimal=",",
         na_values=["...", ".", "-", "/", "x"],
         on_bad_lines="skip",
     )
 
     # Nur Erwerbstätige (Inlandskonzept), keine Veränderungsraten
     df = df[df["value_variable_label"].str.strip() == "Erwerbstätige (Inlandskonzept)"].copy()
+    df = df[df["1_variable_attribute_label"].isin(BUNDESLAENDER)].copy()
 
-    # Bundesland-Spalte: laut Daten ist es "1_variable_attribute_label"
-    bl_col = "1_variable_attribute_label"
+    # Einheit aus value_unit lesen und normalisieren
+    # GENESIS liefert Erwerbstätige in "1000" (Tausend Personen)
+    # value_unit-Spalte enthält die Maßeinheit — wir lesen sie direkt aus
+    einheit = df["value_unit"].iloc[0] if "value_unit" in df.columns and len(df) > 0 else "Anzahl"
+    log.info(f"  GENESIS Einheit: '{einheit}'")
 
-    # Nur Bundesländer (nicht "Deutschland insgesamt" o.ä.)
-    df = df[df[bl_col].isin(BUNDESLAENDER)].copy()
+    wert = pd.to_numeric(df["value"], errors="coerce")
+
+    # Normalisierung auf absolute Personen-Zahlen
+    if einheit.strip() == "1000":
+        wert = (wert * 1000).round(0)
+        log.info("  → Umgerechnet: × 1.000 (Tausend → absolut)")
+    elif einheit.strip() in ("Mill.", "Mio.", "1000000"):
+        wert = (wert * 1_000_000).round(0)
+        log.info("  → Umgerechnet: × 1.000.000 (Mio. → absolut)")
+    # Sonst: Wert ist bereits absolut
 
     result = pd.DataFrame({
-        "bundesland":     df[bl_col].str.strip(),
+        "bundesland":     df["1_variable_attribute_label"].str.strip(),
         "jahr":           pd.to_numeric(df["time"], errors="coerce"),
-        "erwerbstaetige": pd.to_numeric(df["value"], errors="coerce"),
+        "erwerbstaetige": wert,
     }).dropna()
 
     result["erwerbstaetige"] = result["erwerbstaetige"].astype(int)
@@ -323,13 +349,204 @@ def fetch_genesis_erwerbstaetige() -> pd.DataFrame:
 
 
 # ═══════════════════════════════════════════════════════════
-# 3. Mindestlohn (hartkodiert – korrekt, da amtliche Beschlüsse)
-# Quelle: Mindestlohnkommission
+# 3. ENTGELT NACH KREISEN (BA-Entgeltstatistik Excel)
+# Quelle: statistik.arbeitsagentur.de → Entgelt
+# Alle Werte offiziell aus den Excel-Dateien, keine Schätzungen.
+# Untergruppen: Insgesamt, Männer, Frauen, unter 25, 25-55, 55+,
+#               Deutsche, Ausländer, Berufsabschluss-Gruppen
+# ═══════════════════════════════════════════════════════════
+
+# Merkmal-Mapping: Spalte 2 in xlsx Sheet 8.2
+MERKMALE_8_2 = {
+    "Insgesamt":                    "insgesamt",
+    "Männer":                       "maenner",
+    "Frauen":                       "frauen",
+    "unter 25 Jahre":               "u25",
+    "25 bis unter 55 Jahre":        "25_55",
+    "55 Jahre und älter":           "55plus",
+    "Deutsche":                     "deutsche",
+    "Ausländer":                    "auslaender",
+    "ohne Berufsabschluss":         "ohne_abschluss",
+    "anerkannter Berufsabschluss":  "mit_abschluss",
+    "akademischer Berufsabschluss": "akademisch",
+    "Helfer":                       "helfer",
+    "Fachkraft":                    "fachkraft",
+    "Spezialist":                   "spezialist",
+    "Experte":                      "experte",
+}
+
+# Spalten-Mapping für xlsm Sheet 16.2
+MERKMALE_16_2 = {
+    2: "insgesamt",
+    3: "maenner",
+    4: "frauen",
+    5: "deutsche",
+    6: "auslaender",
+    7: "u25",
+}
+
+
+def _parse_xlsx_8_2(path: str) -> pd.DataFrame:
+    """Sheet 8.2: Zeitreihe 2020–2024, alle Kreise, alle Merkmale."""
+    xl = pd.ExcelFile(path)
+    if '8.2' not in xl.sheet_names:
+        return pd.DataFrame()
+    df_raw = xl.parse('8.2', header=None)
+
+    # Jahre aus Zeile 8
+    jahre = []
+    for v in df_raw.iloc[8, 3:]:
+        try:
+            j = pd.to_datetime(v).year
+            if 2000 <= j <= 2030:
+                jahre.append(j)
+        except Exception:
+            pass
+
+    # Kreiszeilen: 5-stellige AGS in Spalte 0
+    kreise_idx = df_raw[
+        df_raw[0].astype(str).str.match(r'^\d{5}$', na=False)
+    ].index
+
+    records = []
+    for idx in kreise_idx:
+        row = df_raw.iloc[idx]
+        ags    = str(row[0])
+        name   = str(row[1]).strip()
+        merkmal_raw = str(row[2]).strip()
+        merkmal = MERKMALE_8_2.get(merkmal_raw)
+        if merkmal is None:
+            continue
+        for i, jahr in enumerate(jahre):
+            val = pd.to_numeric(row[3 + i], errors="coerce")
+            if pd.notna(val):
+                records.append({
+                    "ags":           ags,
+                    "kreis":         name,
+                    "jahr":          int(jahr),
+                    "merkmal":       merkmal,
+                    "median_entgelt": round(float(val), 2),
+                })
+    return pd.DataFrame(records)
+
+
+def _parse_xlsm_16_2(path: str, jahr: int) -> pd.DataFrame:
+    """Sheet 16.2: Querschnitt, ein Jahr, Kreise mit Merkmalen in Spalten."""
+    xl = pd.ExcelFile(path)
+    sheet = next((s for s in xl.sheet_names if '16.2' in s), None)
+    if sheet is None:
+        return pd.DataFrame()
+    df_raw = xl.parse(sheet, header=None)
+
+    records = []
+    for _, row in df_raw.iterrows():
+        name = str(row[0]).strip()
+        key  = row[1]
+        if pd.isna(key) or name in ['Deutschland', 'nan', 'Region', '']:
+            continue
+        try:
+            ags = str(int(float(key))).zfill(5)
+            if len(ags) != 5 or not ags.isdigit():
+                continue
+        except Exception:
+            continue
+
+        for col_idx, merkmal in MERKMALE_16_2.items():
+            if col_idx < len(row):
+                val = pd.to_numeric(row[col_idx], errors="coerce")
+                if pd.notna(val):
+                    records.append({
+                        "ags":           ags,
+                        "kreis":         name,
+                        "jahr":          jahr,
+                        "merkmal":       merkmal,
+                        "median_entgelt": round(float(val), 2),
+                    })
+    return pd.DataFrame(records)
+
+
+def fetch_entgelt_kreise(data_dir: str = None) -> pd.DataFrame:
+    """
+    Liest alle vorhandenen Entgelt-Excel-Dateien ein.
+    Zeitreihe 2015–2024 × ~400 Kreise × Merkmale (Geschlecht, Alter, Nationalität).
+    Alle Werte offiziell aus BA-Entgeltstatistik.
+    """
+    log.info("Entgelt-Kreise: Excel-Dateien einlesen …")
+
+    search_dir = Path(data_dir) if data_dir else ROOT
+    excel_files = (
+        list(search_dir.glob("entgelt-*.xlsx")) +
+        list(search_dir.glob("entgelt-*.xlsm")) +
+        list((search_dir / "data").glob("entgelt-*.xlsx")) +
+        list((search_dir / "data").glob("entgelt-*.xlsm"))
+    )
+
+    if not excel_files:
+        raise FileNotFoundError(
+            "Keine Entgelt-Excel-Dateien gefunden.\n"
+            "Dateien (entgelt-*.xlsx / entgelt-*.xlsm) in den Projektordner legen."
+        )
+
+    dfs = []
+    for path in sorted(excel_files):
+        name = path.name.lower()
+        m = re.search(r'(\d{4})\d{2}', name)
+        jahr_file = int(m.group(1)) if m else None
+
+        if path.suffix == '.xlsx':
+            df = _parse_xlsx_8_2(str(path))
+            if not df.empty:
+                log.info(f"  {path.name}: {len(df)} Zeilen, Jahre {sorted(df.jahr.unique())}")
+                dfs.append(df)
+        elif path.suffix in ('.xlsm', '.xls') and jahr_file:
+            df = _parse_xlsm_16_2(str(path), jahr_file)
+            if not df.empty:
+                log.info(f"  {path.name}: {len(df)} Zeilen, Jahr {jahr_file}")
+                dfs.append(df)
+
+    if not dfs:
+        raise ValueError("Keine Kreisdaten aus den Excel-Dateien lesbar.")
+
+    df_all = pd.concat(dfs, ignore_index=True)
+    df_all = df_all.drop_duplicates(subset=["ags", "jahr", "merkmal"])
+    df_all = df_all.sort_values(["ags", "jahr", "merkmal"]).reset_index(drop=True)
+    df_all["bundesland"] = df_all["ags"].str[:2].map(BL_MAP)
+
+    # Quantil-Gruppen je Jahr (nur für Insgesamt)
+    insgesamt = df_all[df_all["merkmal"] == "insgesamt"].copy()
+    result = []
+    for _, g in insgesamt.groupby("jahr"):
+        g = g.copy()
+        cuts = g["median_entgelt"].quantile([0.2, 0.4, 0.6, 0.8])
+        def grp(v):
+            if v <= cuts[0.2]:   return "Ärmste 20%"
+            elif v <= cuts[0.4]: return "Unteres Mittel"
+            elif v <= cuts[0.6]: return "Mittleres Mittel"
+            elif v <= cuts[0.8]: return "Oberes Mittel"
+            else:                return "Reichste 20%"
+        g["quantil_gruppe"] = g["median_entgelt"].apply(grp)
+        result.append(g)
+
+    insgesamt_mit_gruppe = pd.concat(result)[["ags", "jahr", "quantil_gruppe"]]
+    df_all = df_all.merge(insgesamt_mit_gruppe, on=["ags", "jahr"], how="left")
+
+    df_all["quelle"]       = "BA-Entgeltstatistik (Excel, Stichtag 31.12.)"
+    df_all["abgerufen_am"] = date.today().isoformat()
+
+    kreise = df_all["ags"].nunique()
+    jahre  = f"{int(df_all.jahr.min())}–{int(df_all.jahr.max())}"
+    log.info(f"  ✓ {len(df_all):,} Zeilen, {kreise} Kreise, Jahre {jahre}")
+    return df_all
+
+
+# ═══════════════════════════════════════════════════════════
+# 4. MINDESTLOHN (hartkodiert — korrekt, da amtliche Beschlüsse)
+# Quelle: Mindestlohnkommission (mindestlohn-kommission.de)
 # ═══════════════════════════════════════════════════════════
 
 MINDESTLOHN_HISTORY = [
     {"datum": "2015-01-01", "betrag": 8.50,  "anpassung": "Einführung gesetzl. Mindestlohn"},
-    {"datum": "2017-01-01", "betrag": 8.84,  "anpassung": "1. Anpassung (MiLoKo)"},
+    {"datum": "2017-01-01", "betrag": 8.84,  "anpassung": "1. Anpassung (MiLoKo-Beschluss)"},
     {"datum": "2019-01-01", "betrag": 9.19,  "anpassung": "2. Anpassung"},
     {"datum": "2020-01-01", "betrag": 9.35,  "anpassung": "3. Anpassung"},
     {"datum": "2021-01-01", "betrag": 9.50,  "anpassung": "4. Anpassung"},
@@ -387,11 +604,10 @@ def run_full_update():
 
     save_parquet(get_mindestlohn_df(), "mindestlohn")
 
-    # Entgelt nach Kreisen (aus lokalen Excel-Dateien)
     try:
         save_parquet(fetch_entgelt_kreise(), "entgelt_kreise")
     except Exception as e:
-        log.warning(f"⚠ entgelt_kreise: {e} (Excel-Dateien im Projektordner nötig)")
+        log.warning(f"⚠ entgelt_kreise: {e}")
 
     if errors:
         log.warning("Pipeline mit Fehlern:")
@@ -402,179 +618,11 @@ def run_full_update():
 
 
 def ensure_data_exists():
-    """Parquets prüfen — falls fehlend, Pipeline starten."""
     needed  = ["arbeitslose", "beschaeftigung", "erwerbstaetige", "mindestlohn"]
     missing = [n for n in needed if not (DATA_PROC / f"{n}.parquet").exists()]
     if missing:
         log.info(f"Fehlende Parquets: {missing} → starte Pipeline …")
         run_full_update()
-
-
-# ═══════════════════════════════════════════════════════════
-# 4. Entgelt nach Kreisen (aus lokalen Excel-Dateien)
-# Quellen: BA-Statistik Entgeltstatistik (Excel-Jahreshefte)
-# ═══════════════════════════════════════════════════════════
-
-def _parse_kreise_8_2(path: str) -> pd.DataFrame:
-    """
-    Sheet 8.2 aus neueren xlsx-Dateien (ab 2022):
-    Zeitreihe Median Bruttoentgelt nach Kreis, alle Jahre in einer Tabelle.
-    """
-    xl = pd.ExcelFile(path)
-    if '8.2' not in xl.sheet_names:
-        return pd.DataFrame()
-    df_raw = xl.parse('8.2', header=None)
-
-    # Jahre aus Zeile 8 lesen
-    jahre = []
-    for v in df_raw.iloc[8, 3:]:
-        try:
-            j = pd.to_datetime(v).year
-            if 2000 <= j <= 2030:
-                jahre.append(j)
-        except Exception:
-            pass
-
-    # Kreiszeilen: 5-stellige AGS, nur Insgesamt
-    kreise = df_raw[
-        df_raw[0].astype(str).str.match(r'^\d{5}$', na=False) &
-        df_raw[2].astype(str).str.contains('Insgesamt', na=False)
-    ]
-
-    records = []
-    for _, row in kreise.iterrows():
-        for i, jahr in enumerate(jahre):
-            val = pd.to_numeric(row[3 + i], errors='coerce')
-            if pd.notna(val):
-                records.append({
-                    'ags':           str(row[0]),
-                    'kreis':         str(row[1]).strip(),
-                    'jahr':          int(jahr),
-                    'median_entgelt': round(float(val), 2),
-                })
-    return pd.DataFrame(records)
-
-
-def _parse_kreise_16_2(path: str, jahr: int) -> pd.DataFrame:
-    """
-    Sheet 16.2 aus älteren xlsm-Dateien (2015–2019):
-    Querschnitt Median Bruttoentgelt nach Kreis, ein Stichtag pro Datei.
-    """
-    xl = pd.ExcelFile(path)
-    sheet = next((s for s in xl.sheet_names if '16.2' in s), None)
-    if sheet is None:
-        return pd.DataFrame()
-    df_raw = xl.parse(sheet, header=None)
-
-    records = []
-    for _, row in df_raw.iterrows():
-        name = str(row[0]).strip()
-        key  = row[1]
-        val  = pd.to_numeric(row[2], errors='coerce')
-        if pd.notna(key) and pd.notna(val) and name not in ['Deutschland', 'nan', 'Region']:
-            try:
-                ags = str(int(key)).zfill(5)
-                if len(ags) == 5 and ags.isdigit():
-                    records.append({
-                        'ags':           ags,
-                        'kreis':         name,
-                        'jahr':          jahr,
-                        'median_entgelt': round(float(val), 2),
-                    })
-            except Exception:
-                pass
-    return pd.DataFrame(records)
-
-
-_BL_MAP = {
-    '01': 'Schleswig-Holstein', '02': 'Hamburg', '03': 'Niedersachsen',
-    '04': 'Bremen', '05': 'Nordrhein-Westfalen', '06': 'Hessen',
-    '07': 'Rheinland-Pfalz', '08': 'Baden-Württemberg', '09': 'Bayern',
-    '10': 'Saarland', '11': 'Berlin', '12': 'Brandenburg',
-    '13': 'Mecklenburg-Vorpommern', '14': 'Sachsen', '15': 'Sachsen-Anhalt',
-    '16': 'Thüringen',
-}
-
-
-def fetch_entgelt_kreise(data_dir: str = None) -> pd.DataFrame:
-    """
-    Liest alle vorhandenen Entgelt-Excel-Dateien ein und baut eine
-    Zeitreihe 2015–2024 × ~400 Kreise auf.
-
-    Erwartet im Projektordner (oder data_dir):
-      entgelt-dwolk-0-202412-xlsx.xlsx  (Sheet 8.2: 2020-2024)
-      entgelt-dwolk-0-202312-xlsx.xlsx  (Sheet 8.2: 2020-2023)
-      entgelt-dwolk-0-202212-xlsx.xlsx  (Sheet 8.2: 2020-2022)
-      entgelt-d-0-2019xx-xlsm.xlsm     (Sheet 16.2: je ein Jahr)
-      ...
-    """
-    log.info("Entgelt-Kreise: Excel-Dateien einlesen …")
-
-    search_dir = Path(data_dir) if data_dir else ROOT
-
-    # Alle Excel-Dateien im Projektordner und data/ finden
-    excel_files = list(search_dir.glob("entgelt-*.xlsx")) + \
-                  list(search_dir.glob("entgelt-*.xlsm")) + \
-                  list((search_dir / "data").glob("entgelt-*.xlsx")) + \
-                  list((search_dir / "data").glob("entgelt-*.xlsm"))
-
-    if not excel_files:
-        raise FileNotFoundError(
-            "Keine Entgelt-Excel-Dateien gefunden.\n"
-            "Dateien (entgelt-*.xlsx / entgelt-*.xlsm) in den Projektordner legen."
-        )
-
-    dfs = []
-    for path in sorted(excel_files):
-        name = path.name.lower()
-        # Jahr aus Dateiname extrahieren (z.B. 202412 → 2024)
-        import re
-        m = re.search(r'(\d{4})\d{2}', name)
-        jahr_file = int(m.group(1)) if m else None
-
-        if path.suffix == '.xlsx':
-            df = _parse_kreise_8_2(str(path))
-            if not df.empty:
-                log.info(f"  {path.name}: {len(df)} Zeilen, Jahre {sorted(df.jahr.unique())}")
-                dfs.append(df)
-        elif path.suffix in ('.xlsm', '.xls'):
-            if jahr_file:
-                df = _parse_kreise_16_2(str(path), jahr_file)
-                if not df.empty:
-                    log.info(f"  {path.name}: {len(df)} Zeilen, Jahr {jahr_file}")
-                    dfs.append(df)
-
-    if not dfs:
-        raise ValueError("Keine Kreisdaten konnten aus den Excel-Dateien gelesen werden.")
-
-    df_all = pd.concat(dfs, ignore_index=True)
-    df_all = df_all.drop_duplicates(subset=['ags', 'jahr'])
-    df_all = df_all.sort_values(['ags', 'jahr']).reset_index(drop=True)
-
-    # Bundesland aus AGS
-    df_all['bundesland'] = df_all['ags'].str[:2].map(_BL_MAP)
-
-    # Quantil-Gruppen je Jahr
-    result = []
-    for _, g in df_all.groupby('jahr'):
-        g = g.copy()
-        cuts = g['median_entgelt'].quantile([0.2, 0.4, 0.6, 0.8])
-        def grp(v):
-            if v <= cuts[0.2]:  return 'Ärmste 20%'
-            elif v <= cuts[0.4]: return 'Unteres Mittel'
-            elif v <= cuts[0.6]: return 'Mittleres Mittel'
-            elif v <= cuts[0.8]: return 'Oberes Mittel'
-            else:                return 'Reichste 20%'
-        g['quantil_gruppe'] = g['median_entgelt'].apply(grp)
-        result.append(g)
-
-    df_all = pd.concat(result).sort_values(['ags', 'jahr']).reset_index(drop=True)
-    df_all['quelle']      = 'BA-Entgeltstatistik (Excel)'
-    df_all['abgerufen_am'] = date.today().isoformat()
-
-    log.info(f"  ✓ {len(df_all):,} Zeilen, {df_all.ags.nunique()} Kreise, "
-             f"Jahre {int(df_all.jahr.min())}–{int(df_all.jahr.max())}")
-    return df_all
 
 
 if __name__ == "__main__":
