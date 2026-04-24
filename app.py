@@ -7,9 +7,12 @@ Lokal starten: streamlit run app.py
 
 import io
 from datetime import datetime
+from pathlib import Path
 
 import pandas as pd
 import streamlit as st
+
+ROOT = Path(__file__).parent
 
 from src.pipeline import ensure_data_exists
 from src.queries import (
@@ -46,7 +49,14 @@ st.markdown("""
     border-radius: 8px;
     padding: 14px 18px;
 }
-section[data-testid="stSidebar"] { background: #f0f2f6; }
+/* Sidebar gleiche Farbe wie Hauptbereich */
+section[data-testid="stSidebar"] {
+    background: #0e1117;
+    color: white;
+}
+section[data-testid="stSidebar"] * {
+    color: white !important;
+}
 .stDownloadButton > button {
     background-color: #1f77b4 !important;
     color: white !important;
@@ -73,7 +83,8 @@ with st.sidebar:
 
     seite = st.radio(
         "Navigation",
-        ["🗺️ Überblick", "📈 Zeitreihen", "📊 Beschäftigung", "💶 Mindestlohn", "⬇️ Download"],
+        ["🗺️ Überblick", "📈 Zeitreihen", "📊 Beschäftigung",
+         "💶 Mindestlohn", "🏘️ Entgelt nach Kreisen", "⬇️ Download"],
         label_visibility="collapsed",
     )
     st.divider()
@@ -155,8 +166,7 @@ if "Überblick" in seite:
     bund_al    = int(snap["arbeitslose_gesamt"].sum())
     quote_mean = snap["arbeitslosenquote"].dropna().mean()
     if pd.isna(quote_mean):
-        quote_mean = snap["arbeitslose_gesamt"].sum() / (
-                    snap["beschaeftigte_gesamt"].sum() + snap["arbeitslose_gesamt"].sum()) * 100
+        quote_mean = bund_al / (snap["beschaeftigte_gesamt"].sum() + bund_al) * 100
     bund_quote = round(float(quote_mean), 1)
     bund_be    = snap["beschaeftigte_gesamt"].sum()
     ml_aktuell = float(ml.iloc[-1]["betrag"])
@@ -343,6 +353,189 @@ elif "Mindestlohn" in seite:
                             titel="Arbeitslosigkeit + Mindestlohn-Anpassungen"),
             use_container_width=True,
         )
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# SEITE: ENTGELT NACH KREISEN
+# ═══════════════════════════════════════════════════════════════════════════════
+elif "Kreisen" in seite:
+    st.header("🏘️ Medianentgelt nach Landkreisen")
+    st.caption(
+        "Median der monatlichen Bruttoarbeitsentgelte sozialversicherungspflichtig "
+        "Vollzeitbeschäftigter nach ~400 Kreisen, 2015–2024. "
+        "Quelle: BA-Entgeltstatistik."
+    )
+
+    # Daten laden
+    entgelt_path = ROOT / "data" / "processed" / "entgelt_kreise.parquet"
+    if not entgelt_path.exists():
+        st.warning(
+            "Kreisdaten noch nicht vorhanden. "
+            "Bitte `python -m src.pipeline` ausführen und die Excel-Dateien "
+            "(entgelt-*.xlsx / entgelt-*.xlsm) im Projektordner ablegen."
+        )
+        st.stop()
+
+    import plotly.express as px
+
+    @st.cache_data(ttl=3600)
+    def _load_entgelt():
+        return pd.read_parquet(entgelt_path)
+
+    df_ek = _load_entgelt()
+
+    # ── Filter-Sidebar-Ergänzungen ──────────────────────────────────────────
+    alle_kreise  = sorted(df_ek["kreis"].unique())
+    alle_bl_ek   = sorted(df_ek["bundesland"].dropna().unique())
+    alle_gruppen = ["Alle", "Ärmste 20%", "Unteres Mittel",
+                    "Mittleres Mittel", "Oberes Mittel", "Reichste 20%"]
+    jahre_ek     = sorted(df_ek["jahr"].unique())
+
+    col_f1, col_f2, col_f3 = st.columns(3)
+    with col_f1:
+        sel_bl_ek = st.multiselect(
+            "Bundesland filtern",
+            alle_bl_ek, default=[],
+            help="Leer = alle Bundesländer",
+        )
+    with col_f2:
+        sel_gruppe = st.selectbox("Quantil-Gruppe", alle_gruppen)
+    with col_f3:
+        referenzjahr = st.selectbox("Referenzjahr (Ranking)", jahre_ek,
+                                    index=len(jahre_ek) - 1)
+
+    # Filter anwenden
+    df_filtered = df_ek.copy()
+    if sel_bl_ek:
+        df_filtered = df_filtered[df_filtered["bundesland"].isin(sel_bl_ek)]
+    if sel_gruppe != "Alle":
+        # Kreise filtern die im Referenzjahr zur Gruppe gehören
+        kreise_in_gruppe = df_filtered[
+            (df_filtered["jahr"] == referenzjahr) &
+            (df_filtered["quantil_gruppe"] == sel_gruppe)
+        ]["kreis"].unique()
+        df_filtered = df_filtered[df_filtered["kreis"].isin(kreise_in_gruppe)]
+
+    st.divider()
+
+    # ── 1. Ranking-Tabelle (Referenzjahr) ───────────────────────────────────
+    st.subheader(f"Ranking {referenzjahr}")
+
+    df_rank = df_filtered[df_filtered["jahr"] == referenzjahr].copy()
+    df_rank = df_rank.sort_values("median_entgelt", ascending=False).reset_index(drop=True)
+    df_rank.index += 1
+
+    col_rank, col_chart = st.columns([1, 2])
+
+    with col_rank:
+        st.dataframe(
+            df_rank[["kreis", "bundesland", "median_entgelt", "quantil_gruppe"]]
+            .rename(columns={
+                "kreis": "Kreis", "bundesland": "Bundesland",
+                "median_entgelt": "Median €", "quantil_gruppe": "Gruppe"
+            }),
+            use_container_width=True,
+            height=420,
+            hide_index=False,
+        )
+
+    with col_chart:
+        # Top/Bottom 15 Balken
+        top15    = df_rank.head(15)
+        bottom15 = df_rank.tail(15)
+        df_bar   = pd.concat([top15, bottom15]).drop_duplicates()
+        fig_bar  = px.bar(
+            df_bar,
+            x="median_entgelt", y="kreis",
+            orientation="h",
+            color="quantil_gruppe",
+            color_discrete_map={
+                "Ärmste 20%":     "#d62728",
+                "Unteres Mittel": "#ff7f0e",
+                "Mittleres Mittel":"#2ca02c",
+                "Oberes Mittel":  "#1f77b4",
+                "Reichste 20%":   "#9467bd",
+            },
+            labels={"median_entgelt": "Median €/Monat", "kreis": "",
+                    "quantil_gruppe": "Gruppe"},
+            title=f"Top & Bottom Kreise – Medianentgelt {referenzjahr}",
+        )
+        fig_bar.update_layout(
+            plot_bgcolor="white",
+            margin=dict(l=20, r=20, t=50, b=30),
+            yaxis=dict(autorange="reversed"),
+            legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+        )
+        st.plotly_chart(fig_bar, use_container_width=True)
+
+    st.divider()
+
+    # ── 2. Zeitreihe: Kreis-Dropdown ─────────────────────────────────────────
+    st.subheader("Zeitreihe – Kreisvergleich")
+
+    default_kreise = df_filtered["kreis"].unique()[:5].tolist()
+    sel_kreise = st.multiselect(
+        "Kreise auswählen (max. 10)",
+        sorted(df_filtered["kreis"].unique()),
+        default=default_kreise,
+        max_selections=10,
+    )
+
+    if sel_kreise:
+        df_ts_ek = df_filtered[df_filtered["kreis"].isin(sel_kreise)]
+        fig_ts_ek = px.line(
+            df_ts_ek,
+            x="jahr", y="median_entgelt", color="kreis",
+            markers=True,
+            labels={"jahr": "Jahr", "median_entgelt": "Median €/Monat", "kreis": "Kreis"},
+            title="Medianentgelt-Entwicklung nach Kreis",
+            color_discrete_sequence=px.colors.qualitative.Plotly,
+        )
+        fig_ts_ek.update_layout(
+            plot_bgcolor="white",
+            margin=dict(l=55, r=25, t=50, b=50),
+            yaxis=dict(gridcolor="#f0f0f0", tickformat=",.0f"),
+            xaxis=dict(gridcolor="#f0f0f0", dtick=1),
+            hovermode="x unified",
+            legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+        )
+        st.plotly_chart(fig_ts_ek, use_container_width=True)
+
+    st.divider()
+
+    # ── 3. Regionale Muster: Bundesland-Boxplot ──────────────────────────────
+    st.subheader(f"Regionale Verteilung {referenzjahr}")
+    df_box = df_ek[df_ek["jahr"] == referenzjahr].copy()
+    df_box = df_box.sort_values("median_entgelt", ascending=False)
+
+    fig_box = px.box(
+        df_box,
+        x="bundesland", y="median_entgelt",
+        color="bundesland",
+        labels={"bundesland": "Bundesland", "median_entgelt": "Median €/Monat"},
+        title=f"Entgelt-Verteilung nach Bundesland – Kreisebene {referenzjahr}",
+        color_discrete_sequence=px.colors.qualitative.Plotly,
+    )
+    fig_box.update_layout(
+        plot_bgcolor="white",
+        margin=dict(l=55, r=25, t=50, b=100),
+        xaxis=dict(tickangle=-45),
+        showlegend=False,
+        yaxis=dict(gridcolor="#f0f0f0", tickformat=",.0f"),
+    )
+    st.plotly_chart(fig_box, use_container_width=True)
+
+    st.divider()
+
+    # ── Download ─────────────────────────────────────────────────────────────
+    dl_buttons(df_filtered, f"entgelt_kreise_{referenzjahr}", "Kreisdaten exportieren")
+
+    st.markdown(
+        '<p class="source-note">Quelle: Bundesagentur für Arbeit – '
+        'Entgeltstatistik (Vollzeitbeschäftigte Kerngruppe, Stichtag 31.12.) · '
+        'Datenlizenz Deutschland 2.0</p>',
+        unsafe_allow_html=True,
+    )
 
 
 # ═══════════════════════════════════════════════════════════════════════════════

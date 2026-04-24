@@ -387,6 +387,12 @@ def run_full_update():
 
     save_parquet(get_mindestlohn_df(), "mindestlohn")
 
+    # Entgelt nach Kreisen (aus lokalen Excel-Dateien)
+    try:
+        save_parquet(fetch_entgelt_kreise(), "entgelt_kreise")
+    except Exception as e:
+        log.warning(f"⚠ entgelt_kreise: {e} (Excel-Dateien im Projektordner nötig)")
+
     if errors:
         log.warning("Pipeline mit Fehlern:")
         for e in errors:
@@ -402,6 +408,173 @@ def ensure_data_exists():
     if missing:
         log.info(f"Fehlende Parquets: {missing} → starte Pipeline …")
         run_full_update()
+
+
+# ═══════════════════════════════════════════════════════════
+# 4. Entgelt nach Kreisen (aus lokalen Excel-Dateien)
+# Quellen: BA-Statistik Entgeltstatistik (Excel-Jahreshefte)
+# ═══════════════════════════════════════════════════════════
+
+def _parse_kreise_8_2(path: str) -> pd.DataFrame:
+    """
+    Sheet 8.2 aus neueren xlsx-Dateien (ab 2022):
+    Zeitreihe Median Bruttoentgelt nach Kreis, alle Jahre in einer Tabelle.
+    """
+    xl = pd.ExcelFile(path)
+    if '8.2' not in xl.sheet_names:
+        return pd.DataFrame()
+    df_raw = xl.parse('8.2', header=None)
+
+    # Jahre aus Zeile 8 lesen
+    jahre = []
+    for v in df_raw.iloc[8, 3:]:
+        try:
+            j = pd.to_datetime(v).year
+            if 2000 <= j <= 2030:
+                jahre.append(j)
+        except Exception:
+            pass
+
+    # Kreiszeilen: 5-stellige AGS, nur Insgesamt
+    kreise = df_raw[
+        df_raw[0].astype(str).str.match(r'^\d{5}$', na=False) &
+        df_raw[2].astype(str).str.contains('Insgesamt', na=False)
+    ]
+
+    records = []
+    for _, row in kreise.iterrows():
+        for i, jahr in enumerate(jahre):
+            val = pd.to_numeric(row[3 + i], errors='coerce')
+            if pd.notna(val):
+                records.append({
+                    'ags':           str(row[0]),
+                    'kreis':         str(row[1]).strip(),
+                    'jahr':          int(jahr),
+                    'median_entgelt': round(float(val), 2),
+                })
+    return pd.DataFrame(records)
+
+
+def _parse_kreise_16_2(path: str, jahr: int) -> pd.DataFrame:
+    """
+    Sheet 16.2 aus älteren xlsm-Dateien (2015–2019):
+    Querschnitt Median Bruttoentgelt nach Kreis, ein Stichtag pro Datei.
+    """
+    xl = pd.ExcelFile(path)
+    sheet = next((s for s in xl.sheet_names if '16.2' in s), None)
+    if sheet is None:
+        return pd.DataFrame()
+    df_raw = xl.parse(sheet, header=None)
+
+    records = []
+    for _, row in df_raw.iterrows():
+        name = str(row[0]).strip()
+        key  = row[1]
+        val  = pd.to_numeric(row[2], errors='coerce')
+        if pd.notna(key) and pd.notna(val) and name not in ['Deutschland', 'nan', 'Region']:
+            try:
+                ags = str(int(key)).zfill(5)
+                if len(ags) == 5 and ags.isdigit():
+                    records.append({
+                        'ags':           ags,
+                        'kreis':         name,
+                        'jahr':          jahr,
+                        'median_entgelt': round(float(val), 2),
+                    })
+            except Exception:
+                pass
+    return pd.DataFrame(records)
+
+
+_BL_MAP = {
+    '01': 'Schleswig-Holstein', '02': 'Hamburg', '03': 'Niedersachsen',
+    '04': 'Bremen', '05': 'Nordrhein-Westfalen', '06': 'Hessen',
+    '07': 'Rheinland-Pfalz', '08': 'Baden-Württemberg', '09': 'Bayern',
+    '10': 'Saarland', '11': 'Berlin', '12': 'Brandenburg',
+    '13': 'Mecklenburg-Vorpommern', '14': 'Sachsen', '15': 'Sachsen-Anhalt',
+    '16': 'Thüringen',
+}
+
+
+def fetch_entgelt_kreise(data_dir: str = None) -> pd.DataFrame:
+    """
+    Liest alle vorhandenen Entgelt-Excel-Dateien ein und baut eine
+    Zeitreihe 2015–2024 × ~400 Kreise auf.
+
+    Erwartet im Projektordner (oder data_dir):
+      entgelt-dwolk-0-202412-xlsx.xlsx  (Sheet 8.2: 2020-2024)
+      entgelt-dwolk-0-202312-xlsx.xlsx  (Sheet 8.2: 2020-2023)
+      entgelt-dwolk-0-202212-xlsx.xlsx  (Sheet 8.2: 2020-2022)
+      entgelt-d-0-2019xx-xlsm.xlsm     (Sheet 16.2: je ein Jahr)
+      ...
+    """
+    log.info("Entgelt-Kreise: Excel-Dateien einlesen …")
+
+    search_dir = Path(data_dir) if data_dir else ROOT
+
+    # Alle Excel-Dateien im Projektordner und data/ finden
+    excel_files = list(search_dir.glob("entgelt-*.xlsx")) + \
+                  list(search_dir.glob("entgelt-*.xlsm")) + \
+                  list((search_dir / "data").glob("entgelt-*.xlsx")) + \
+                  list((search_dir / "data").glob("entgelt-*.xlsm"))
+
+    if not excel_files:
+        raise FileNotFoundError(
+            "Keine Entgelt-Excel-Dateien gefunden.\n"
+            "Dateien (entgelt-*.xlsx / entgelt-*.xlsm) in den Projektordner legen."
+        )
+
+    dfs = []
+    for path in sorted(excel_files):
+        name = path.name.lower()
+        # Jahr aus Dateiname extrahieren (z.B. 202412 → 2024)
+        import re
+        m = re.search(r'(\d{4})\d{2}', name)
+        jahr_file = int(m.group(1)) if m else None
+
+        if path.suffix == '.xlsx':
+            df = _parse_kreise_8_2(str(path))
+            if not df.empty:
+                log.info(f"  {path.name}: {len(df)} Zeilen, Jahre {sorted(df.jahr.unique())}")
+                dfs.append(df)
+        elif path.suffix in ('.xlsm', '.xls'):
+            if jahr_file:
+                df = _parse_kreise_16_2(str(path), jahr_file)
+                if not df.empty:
+                    log.info(f"  {path.name}: {len(df)} Zeilen, Jahr {jahr_file}")
+                    dfs.append(df)
+
+    if not dfs:
+        raise ValueError("Keine Kreisdaten konnten aus den Excel-Dateien gelesen werden.")
+
+    df_all = pd.concat(dfs, ignore_index=True)
+    df_all = df_all.drop_duplicates(subset=['ags', 'jahr'])
+    df_all = df_all.sort_values(['ags', 'jahr']).reset_index(drop=True)
+
+    # Bundesland aus AGS
+    df_all['bundesland'] = df_all['ags'].str[:2].map(_BL_MAP)
+
+    # Quantil-Gruppen je Jahr
+    result = []
+    for _, g in df_all.groupby('jahr'):
+        g = g.copy()
+        cuts = g['median_entgelt'].quantile([0.2, 0.4, 0.6, 0.8])
+        def grp(v):
+            if v <= cuts[0.2]:  return 'Ärmste 20%'
+            elif v <= cuts[0.4]: return 'Unteres Mittel'
+            elif v <= cuts[0.6]: return 'Mittleres Mittel'
+            elif v <= cuts[0.8]: return 'Oberes Mittel'
+            else:                return 'Reichste 20%'
+        g['quantil_gruppe'] = g['median_entgelt'].apply(grp)
+        result.append(g)
+
+    df_all = pd.concat(result).sort_values(['ags', 'jahr']).reset_index(drop=True)
+    df_all['quelle']      = 'BA-Entgeltstatistik (Excel)'
+    df_all['abgerufen_am'] = date.today().isoformat()
+
+    log.info(f"  ✓ {len(df_all):,} Zeilen, {df_all.ags.nunique()} Kreise, "
+             f"Jahre {int(df_all.jahr.min())}–{int(df_all.jahr.max())}")
+    return df_all
 
 
 if __name__ == "__main__":

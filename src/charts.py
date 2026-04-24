@@ -177,6 +177,14 @@ def chart_karte(
     label = _mlabels.get(metrik, metrik)
     geo   = _geojson()
 
+    # Sicherstellen dass Quote-Werte vorhanden sind
+    df = df.copy()
+    if "arbeitslosenquote" in df.columns and df["arbeitslosenquote"].isna().all():
+        df["arbeitslosenquote"] = (
+            df["arbeitslose_gesamt"] /
+            (df["beschaeftigte_gesamt"] + df["arbeitslose_gesamt"]) * 100
+        ).round(1)
+
     # Fallback: Balken-Chart wenn GeoJSON nicht ladbar
     if not geo:
         fig = px.bar(
@@ -187,26 +195,27 @@ def chart_karte(
         )
         return _layout(fig, titel or label)
 
-    # Hover-Felder je nach Metrik
-    hover = {"bundesland": True, "arbeitslose_gesamt": ":,d"}
-    if "arbeitslosenquote" in df.columns:
-        hover["arbeitslosenquote"] = ":.1f"
-
+    # Hover-Template manuell definieren (vermeidet Plotly-Syntax-Fehler)
     fig = px.choropleth(
         df, geojson=geo,
         locations="bundesland", featureidkey="properties.name",
         color=metrik, color_continuous_scale="Blues_r",
         labels={metrik: label},
-        hover_data=hover,
+        custom_data=["bundesland", "arbeitslose_gesamt", "arbeitslosenquote"],
+    )
+    fig.update_traces(
+        hovertemplate=(
+            "<b>%{customdata[0]}</b><br>"
+            "Arbeitslose: %{customdata[1]:,.0f}<br>"
+            "AL-Quote: %{customdata[2]:.1f} %<extra></extra>"
+        )
     )
     fig.update_geos(fitbounds="locations", visible=False)
-
-    # _BASE_LAYOUT_NO_MARGIN verwenden um doppelten margin-Key zu vermeiden
     fig.update_layout(
         **_BASE_LAYOUT_NO_MARGIN,
         margin=dict(l=0, r=0, t=50, b=0),
         title=dict(text=titel or label, font=dict(size=14), x=0),
-        geo=dict(bgcolor="white"),
+        geo=dict(bgcolor="rgba(0,0,0,0)"),
         coloraxis_colorbar=dict(title=label, len=0.55),
     )
     return fig
