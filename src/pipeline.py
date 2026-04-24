@@ -618,11 +618,28 @@ def run_full_update():
 
 
 def ensure_data_exists():
+    """Parquets prüfen — falls fehlend, Pipeline starten."""
     needed  = ["arbeitslose", "beschaeftigung", "erwerbstaetige", "mindestlohn"]
     missing = [n for n in needed if not (DATA_PROC / f"{n}.parquet").exists()]
     if missing:
         log.info(f"Fehlende Parquets: {missing} → starte Pipeline …")
         run_full_update()
+
+    # entgelt_kreise: falls nicht lokal vorhanden, von HF Dataset herunterladen
+    entgelt_path = DATA_PROC / "entgelt_kreise.parquet"
+    if not entgelt_path.exists():
+        log.info("entgelt_kreise.parquet nicht lokal → lade von HF Dataset …")
+        try:
+            from huggingface_hub import hf_hub_download
+            path = hf_hub_download(
+                repo_id="Miz777/arbeitsmarkt-daten",
+                filename="entgelt_kreise.parquet",
+                repo_type="dataset",
+                local_dir=str(DATA_PROC),
+            )
+            log.info(f"  ✓ entgelt_kreise.parquet heruntergeladen: {path}")
+        except Exception as e:
+            log.warning(f"  ⚠ Download fehlgeschlagen: {e}")
 
 
 if __name__ == "__main__":
