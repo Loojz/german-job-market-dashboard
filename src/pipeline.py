@@ -374,6 +374,41 @@ def fetch_genesis_erwerbstaetige() -> pd.DataFrame:
 
 
 # ═══════════════════════════════════════════════════════════
+# 2b. TARIFLOHNINDEX (Destatis Lange Reihe)
+# Quelle: destatis.de → Tarifverdienste-Tarifbindung
+# Index der tariflichen Monatsverdienste ohne Sonderzahlungen,
+# Gesamtwirtschaft, Basis 2020 = 100
+# Werte aus offizieller Destatis-Lange-Reihe (eingestellt nach 2022)
+# + aktueller Destatis-Tabelle 62361 (Stand Februar 2026)
+# Quelle wird auch von der Bundesbank weitergeführt
+# ═══════════════════════════════════════════════════════════
+
+TARIFLOHNINDEX_DESTATIS = {
+    2010:  78.3, 2011:  79.4, 2012:  81.8, 2013:  83.8,
+    2014:  86.3, 2015:  88.3, 2016:  90.2, 2017:  92.8,
+    2018:  95.1, 2019:  97.7, 2020: 100.0, 2021: 101.4,
+    2022: 102.8, 2023: 105.3, 2024: 109.8, 2025: 115.3,
+}
+
+
+def fetch_tariflohnindex() -> pd.DataFrame:
+    """
+    Index der tariflichen Monatsverdienste (Gesamtwirtschaft, ohne Sonderzahlungen)
+    auf Basis 2020 = 100. Werte aus Destatis-Lange-Reihe + aktueller
+    Destatis-Veröffentlichung — wird auch von der Bundesbank weitergeführt.
+    """
+    log.info("Tariflohnindex laden (Destatis-Werte, hardcoded)…")
+    df = pd.DataFrame([
+        {"jahr": jahr, "index_2020": wert}
+        for jahr, wert in sorted(TARIFLOHNINDEX_DESTATIS.items())
+    ])
+    df["quelle"]       = "Destatis 62361 (Lange Reihe + lfd.) / Bundesbank"
+    df["abgerufen_am"] = date.today().isoformat()
+    log.info(f"  ✓ {len(df)} Jahreswerte ({df.jahr.min()}–{df.jahr.max()})")
+    return df
+
+
+# ═══════════════════════════════════════════════════════════
 # 3. ENTGELT NACH KREISEN (BA-Entgeltstatistik Excel)
 # Quelle: statistik.arbeitsagentur.de → Entgelt
 # Alle Werte offiziell aus den Excel-Dateien, keine Schätzungen.
@@ -628,6 +663,7 @@ def run_full_update():
             errors.append(f"{name}: {e}")
 
     save_parquet(get_mindestlohn_df(), "mindestlohn")
+    save_parquet(fetch_tariflohnindex(), "tariflohnindex")
 
     try:
         save_parquet(fetch_entgelt_kreise(), "entgelt_kreise")

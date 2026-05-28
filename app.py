@@ -24,8 +24,10 @@ from src.queries import (
     query_kreis_liste,
     query_kreis_story,
     query_mindestlohn,
+    query_mindestlohn_vs_tariflohn,
     query_quintil_verlauf,
     query_regional_snapshot,
+    query_tariflohnindex,
     query_yoy_change,
 )
 from src.charts import (
@@ -38,6 +40,7 @@ from src.charts import (
     chart_karte_kreise,
     chart_kreis_im_kontext,
     chart_mindestlohn,
+    chart_mindestlohn_vs_tariflohn,
     chart_quintil_bahn,
     chart_quintil_verlauf,
     chart_rang_sparkline,
@@ -650,6 +653,71 @@ elif seite == "Mindestlohn":
                             titel="Arbeitslosigkeit und Mindestlohn-Anpassungen"),
             use_container_width=True,
         )
+
+    st.divider()
+
+    # ── Vergleich Mindestlohn vs. Tariflohnindex ─────────────────────────────
+    st.subheader("Mindestlohn vs. allgemeiner Tariflohn")
+    st.caption(
+        "Wie stark ist der gesetzliche Mindestlohn relativ zum durchschnittlichen "
+        "Tariflohn gestiegen? Indizes beider Reihen auf ein gemeinsames Basisjahr "
+        "normalisiert — eine wachsende Lücke zwischen den Linien zeigt, dass der "
+        "Mindestlohn schneller steigt als das allgemeine Tarifgefüge."
+    )
+
+    col_b, col_m = st.columns([1, 1])
+    with col_b:
+        basis_jahr = st.selectbox(
+            "Basisjahr (= 100)",
+            [2015, 2010, 2020],
+            index=0,
+            help="2015 = Mindestlohn-Einführung. 2010 = Pre-Mindestlohn-Kontext.",
+        )
+
+    df_milt = query_mindestlohn_vs_tariflohn(basis_jahr)
+
+    if df_milt.empty:
+        st.info("Vergleichsdaten nicht verfügbar.")
+    else:
+        # Kennzahlen letztes Jahr
+        last = df_milt.iloc[-1]
+        ml_growth = last["mindestlohn_idx"] - 100
+        tl_growth = last["tariflohn_idx"]   - 100
+        gap       = ml_growth - tl_growth
+
+        k1, k2, k3 = st.columns(3)
+        k1.metric(
+            f"Mindestlohn seit {basis_jahr}",
+            f"+{ml_growth:.1f} %",
+            help=f"Wachstum gegenüber dem Basisjahr {basis_jahr}.",
+        )
+        k2.metric(
+            f"Tariflohnindex seit {basis_jahr}",
+            f"+{tl_growth:.1f} %",
+            help="Durchschnittliche Tariflohnentwicklung in Gesamtdeutschland.",
+        )
+        k3.metric(
+            "Mindestlohn-Vorsprung",
+            f"+{gap:.1f} pp",
+            help="Zusätzliches Wachstum des Mindestlohns ggü. Tariflöhnen in Prozentpunkten.",
+        )
+
+        st.plotly_chart(
+            chart_mindestlohn_vs_tariflohn(df_milt, basis_jahr),
+            use_container_width=True,
+        )
+
+        if gap > 5:
+            st.caption(
+                f"Der Mindestlohn ist seit {basis_jahr} um **{gap:.1f} Prozentpunkte** "
+                "stärker gewachsen als der durchschnittliche Tariflohn — politisch "
+                "gewollte Aufholbewegung im unteren Lohnsegment."
+            )
+        elif gap < -5:
+            st.caption(
+                "Tariflöhne wachsen schneller als der Mindestlohn — der Mindestlohn "
+                "verliert relativ an Bedeutung als Untergrenze."
+            )
 
     st.divider()
 
@@ -1308,6 +1376,10 @@ elif seite == "Download":
     st.divider()
     st.subheader("Mindestlohn-Anpassungshistorie")
     dl_buttons(_mindestlohn(), "mindestlohn_komplett")
+
+    st.divider()
+    st.subheader("Tariflohnindex — Jahreswerte (Destatis)")
+    dl_buttons(query_tariflohnindex(), "tariflohnindex_destatis")
 
     st.divider()
     st.subheader("Regionaler Snapshot (aktuellster Stand je Bundesland)")

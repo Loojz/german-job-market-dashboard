@@ -160,6 +160,64 @@ def query_mindestlohn() -> pd.DataFrame:
     return _con().execute("SELECT * FROM mindestlohn ORDER BY datum").df()
 
 
+# ── Tariflohnindex (Destatis) ────────────────────────────────────────────────
+
+def query_tariflohnindex(start_jahr: int = 2010, end_jahr: int = 2025) -> pd.DataFrame:
+    """Index der tariflichen Monatsverdienste — Jahreswerte 2010–2025."""
+    q = f"""
+        SELECT jahr, index_2020, quelle
+        FROM   tariflohnindex
+        WHERE  jahr BETWEEN {int(start_jahr)} AND {int(end_jahr)}
+        ORDER  BY jahr
+    """
+    try:
+        return _con().execute(q).df()
+    except Exception:
+        return pd.DataFrame()
+
+
+def query_mindestlohn_vs_tariflohn(basis_jahr: int = 2015) -> pd.DataFrame:
+    """
+    Vergleicht Mindestlohn und Tariflohnindex auf einer gemeinsamen Index-Basis.
+    Standard-Basis: 2015 (Einführung des gesetzlichen Mindestlohns) = 100.
+    Liefert pro Jahr: Mindestlohn €/Std., Tariflohnindex (Original 2020=100),
+    und beide auf basis_jahr = 100 normalisiert.
+    """
+    by = int(basis_jahr)
+    q = f"""
+        WITH ml AS (
+            SELECT EXTRACT(YEAR FROM datum) AS jahr,
+                   AVG(betrag) AS mindestlohn_eur
+            FROM   mindestlohn
+            GROUP  BY EXTRACT(YEAR FROM datum)
+        ),
+        ml_full AS (
+            -- Jeden Wert auf das ganze Jahr extrapolieren (forward fill)
+            SELECT y.jahr,
+                   LAST_VALUE(m.mindestlohn_eur IGNORE NULLS)
+                       OVER (ORDER BY y.jahr ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW)
+                       AS mindestlohn_eur
+            FROM   (SELECT DISTINCT jahr FROM tariflohnindex) y
+            LEFT   JOIN ml m USING (jahr)
+        ),
+        ml_basis AS (SELECT mindestlohn_eur FROM ml_full WHERE jahr = {by}),
+        tl_basis AS (SELECT index_2020      FROM tariflohnindex WHERE jahr = {by})
+        SELECT  t.jahr,
+                m.mindestlohn_eur,
+                t.index_2020                                                    AS tariflohn_idx2020,
+                ROUND(100.0 * m.mindestlohn_eur / (SELECT mindestlohn_eur FROM ml_basis), 1) AS mindestlohn_idx,
+                ROUND(100.0 * t.index_2020      / (SELECT index_2020      FROM tl_basis), 1) AS tariflohn_idx
+        FROM    tariflohnindex t
+        JOIN    ml_full m USING (jahr)
+        WHERE   m.mindestlohn_eur IS NOT NULL
+        ORDER   BY t.jahr
+    """
+    try:
+        return _con().execute(q).df()
+    except Exception:
+        return pd.DataFrame()
+
+
 # ── Regional-Snapshot ────────────────────────────────────────────────────────
 
 def query_regional_snapshot() -> pd.DataFrame:

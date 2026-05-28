@@ -668,6 +668,86 @@ def chart_rang_sparkline(df: pd.DataFrame, kreis_name: str = "") -> go.Figure:
     return fig
 
 
+# ─── 11. Mindestlohn vs. Tariflohnindex (Indexvergleich) ─────────────────────
+
+def chart_mindestlohn_vs_tariflohn(df: pd.DataFrame, basis_jahr: int = 2015) -> go.Figure:
+    """
+    Index-Vergleich: Mindestlohn und Tariflohnindex auf gemeinsamer Basis
+    (Standard: basis_jahr = 100). Zeigt wie stark der Mindestlohn relativ
+    zum allgemeinen Tariflohn-Trend gestiegen ist.
+    """
+    if df.empty:
+        fig = go.Figure()
+        _layout(fig, "Mindestlohn vs. Tariflohn — keine Daten")
+        return fig
+
+    fig = go.Figure()
+
+    # Schattierte Fläche zwischen den beiden Linien = das "Mindestlohn-Plus"
+    # (nur wenn Mindestlohn-Index > Tariflohn-Index)
+    fig.add_trace(go.Scatter(
+        x=df["jahr"], y=df["mindestlohn_idx"],
+        mode="lines", line=dict(width=0),
+        showlegend=False, hoverinfo="skip",
+    ))
+    fig.add_trace(go.Scatter(
+        x=df["jahr"], y=df["tariflohn_idx"],
+        mode="lines", line=dict(width=0),
+        fill="tonexty", fillcolor="rgba(240, 112, 0, 0.10)",
+        showlegend=False, hoverinfo="skip",
+    ))
+
+    # Tariflohnindex (Hintergrund-Linie)
+    fig.add_trace(go.Scatter(
+        x=df["jahr"], y=df["tariflohn_idx"],
+        name="Tariflohnindex (Destatis)",
+        mode="lines+markers",
+        line=dict(color="#1B4F72", width=2.5),
+        marker=dict(size=7),
+        customdata=df["tariflohn_idx2020"],
+        hovertemplate=(
+            "<b>Tariflohnindex</b><br>"
+            "Jahr: %{x}<br>"
+            "Index (Basis " + str(basis_jahr) + "=100): %{y:.1f}<br>"
+            "Original (2020=100): %{customdata:.1f}<extra></extra>"
+        ),
+    ))
+
+    # Mindestlohn (Vordergrund-Linie)
+    fig.add_trace(go.Scatter(
+        x=df["jahr"], y=df["mindestlohn_idx"],
+        name="Mindestlohn (BMAS)",
+        mode="lines+markers",
+        line=dict(color=_THWS_ORANGE, width=3.2),
+        marker=dict(size=8, color=_THWS_ORANGE,
+                    line=dict(color="white", width=1.5)),
+        customdata=df["mindestlohn_eur"],
+        hovertemplate=(
+            "<b>Mindestlohn</b><br>"
+            "Jahr: %{x}<br>"
+            "Index (Basis " + str(basis_jahr) + "=100): %{y:.1f}<br>"
+            "€/Stunde: %{customdata:.2f}<extra></extra>"
+        ),
+    ))
+
+    # Basis-Linie 100
+    fig.add_hline(
+        y=100, line=dict(color="#999", width=0.8, dash="dot"),
+        annotation_text=f"Basis {basis_jahr}",
+        annotation_position="left",
+        annotation_font=dict(size=10, color="#6E6E73"),
+    )
+
+    _layout(
+        fig,
+        f"Mindestlohn vs. Tariflohnindex (Basis {basis_jahr} = 100)",
+        f"Index ({basis_jahr} = 100)",
+    )
+    fig.update_yaxes(tickformat=".0f")
+    fig.update_xaxes(dtick=1)
+    return fig
+
+
 # Backward-compat Alias
 def chart_armste_vs_rest(df, vergleichs_label="Reichste 20%", highlight_jahr=None):
     """Wrapper für alte Aufrufe — erwartet 'entgelt_armste'/'entgelt_vergleich'-Spalten."""
