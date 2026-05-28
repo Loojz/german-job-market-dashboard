@@ -121,16 +121,35 @@ def query_erwerbstaetige(
     start_jahr: int = 2000,
     end_jahr:   int = 2023,
 ) -> pd.DataFrame:
+    """
+    Erwerbstätige je Bundesland und Jahr.
+    Defensive Aggregation: Falls das Parquet noch mehrere Zeilen pro Bundesland/Jahr
+    enthält (alte Pipeline-Version mit Wirtschaftszweig-Aufgliederung), nehmen wir
+    das Maximum — das entspricht immer dem 'Insgesamt' über alle Branchen.
+    Werte sind in Tausend Personen (GENESIS-Einheit), für die Anzeige × 1000.
+    """
     bl_filter = ""
     if bundeslaender:
         bl_quoted = ", ".join(f"'{b}'" for b in bundeslaender)
         bl_filter = f"AND bundesland IN ({bl_quoted})"
     q = f"""
-        SELECT jahr, bundesland, erwerbstaetige, quelle
-        FROM   erwerbstaetige
-        WHERE  jahr BETWEEN {start_jahr} AND {end_jahr}
-        {bl_filter}
-        ORDER  BY jahr, bundesland
+        WITH agg AS (
+            SELECT jahr, bundesland,
+                   MAX(erwerbstaetige) AS erwerbstaetige_raw,
+                   ANY_VALUE(quelle)   AS quelle
+            FROM   erwerbstaetige
+            WHERE  jahr BETWEEN {start_jahr} AND {end_jahr}
+            {bl_filter}
+            GROUP  BY jahr, bundesland
+        )
+        SELECT  jahr, bundesland,
+                CASE WHEN erwerbstaetige_raw < 100000
+                     THEN erwerbstaetige_raw * 1000
+                     ELSE erwerbstaetige_raw
+                END AS erwerbstaetige,
+                quelle
+        FROM    agg
+        ORDER   BY jahr, bundesland
     """
     return _con().execute(q).df()
 
@@ -231,3 +250,170 @@ def query_entgelt_kreis_detail(ags: str) -> pd.DataFrame:
         ORDER  BY jahr, merkmal
     """
     return _con().execute(q).df()
+
+
+def query_quintil_verlauf(merkmal: str = "insgesamt") -> pd.DataFrame:
+    """Ø Entgelt je Quantil-Gruppe und Jahr — für Trendvergleich über die Zeit."""
+    m = merkmal.replace("'", "")
+    q = f"""
+        WITH basis AS (
+            SELECT ags, jahr, quantil_gruppe
+            FROM   entgelt_kreise
+            WHERE  merkmal = 'insgesamt' AND quantil_gruppe IS NOT NULL
+        )
+        SELECT  e.jahr,
+                b.quantil_gruppe,
+                ROUND(AVG(e.median_entgelt), 0) AS avg_entgelt,
+                COUNT(DISTINCT e.ags)            AS n_kreise
+        FROM    entgelt_kreise e
+        JOIN    basis b ON e.ags = b.ags AND e.jahr = b.jahr
+        WHERE   e.merkmal = '{m}'
+        GROUP   BY e.jahr, b.quantil_gruppe
+        ORDER   BY e.jahr, b.quantil_gruppe
+    """
+    try:
+        return _con().execute(q).df()
+    except Exception:
+        return pd.DataFrame()
+
+
+def _quintil_filter(gruppe: str, andere: str | None = None) -> str:
+    """SQL-Filter-Fragment für eine Quintil-Gruppe.
+       'Alle anderen' = alle Quintile außer 'andere'."""
+    g = str(gruppe).replace("'", "")
+    if g == "Alle anderen" and andere:
+        a = str(andere).replace("'", "")
+        return f"(b.quantil_gruppe IS NOT NULL AND b.quantil_gruppe <> '{a}')"
+    return f"b.quantil_gruppe = '{g}'"
+
+
+def query_gruppen_vergleich(
+    merkmal: str = "insgesamt",
+    gruppe_a: str = "Ärmste 20%",
+    gruppe_b: str = "Reichste 20%",
+) -> pd.DataFrame:
+    """
+    Vergleicht die Entgeltentwicklung zweier frei wählbarer Quintil-Gruppen.
+    'Alle anderen' als Wert für gruppe_b bedeutet: alle Quintile außer gruppe_a.
+    """
+    m         = str(merkmal).replace("'", "")
+    filter_a  = _quintil_filter(gruppe_a)
+    filter_b  = _quintil_filter(gruppe_b, andere=gruppe_a)
+    q = f"""
+        WITH basis AS (
+            SELECT ags, jahr, quantil_gruppe
+            FROM   entgelt_kreise
+            WHERE  merkmal = 'insgesamt' AND quantil_gruppe IS NOT NULL
+        ),
+        a AS (
+            SELECT e.jahr,
+                   ROUND(AVG(e.median_entgelt), 0) AS entgelt_a,
+                   COUNT(DISTINCT e.ags)            AS n_a
+            FROM   entgelt_kreise e
+            JOIN   basis b ON e.ags = b.ags AND e.jahr = b.jahr
+            WHERE  e.merkmal = '{m}' AND {filter_a}
+            GROUP  BY e.jahr
+        ),
+        b AS (
+            SELECT e.jahr,
+                   ROUND(AVG(e.median_entgelt), 0) AS entgelt_b,
+                   COUNT(DISTINCT e.ags)            AS n_b
+            FROM   entgelt_kreise e
+            JOIN   basis b ON e.ags = b.ags AND e.jahr = b.jahr
+            WHERE  e.merkmal = '{m}' AND {filter_b}
+            GROUP  BY e.jahr
+        )
+        SELECT  a.jahr,
+                a.entgelt_a,
+                b.entgelt_b,
+                (b.entgelt_b - a.entgelt_a)                                       AS gap_absolut,
+                ROUND(100.0 * (b.entgelt_b - a.entgelt_a)
+                      / NULLIF(a.entgelt_a, 0), 1)                                AS gap_pct,
+                a.n_a,
+                b.n_b
+        FROM    a
+        JOIN    b ON a.jahr = b.jahr
+        ORDER   BY a.jahr
+    """
+    try:
+        return _con().execute(q).df()
+    except Exception:
+        return pd.DataFrame()
+
+
+# Backward-compat Alias — falls anderswo noch genutzt
+def query_armste_vs_rest(merkmal: str = "insgesamt",
+                         vergleichs_gruppe: str = "Reichste 20%") -> pd.DataFrame:
+    vg = "Alle anderen" if vergleichs_gruppe == "Restliche 80%" else vergleichs_gruppe
+    df = query_gruppen_vergleich(merkmal, "Ärmste 20%", vg)
+    if df.empty:
+        return df
+    return df.rename(columns={
+        "entgelt_a": "entgelt_armste", "entgelt_b": "entgelt_vergleich",
+        "n_a": "n_armste", "n_b": "n_vergleich",
+    })
+
+
+def query_kreis_story(ags: str, merkmal: str = "insgesamt") -> pd.DataFrame:
+    """
+    Zeitverlauf eines Kreises: Lohn, Quintil-Gruppe und Rang über alle Jahre.
+    - Lohn-Rang bezieht sich auf das gewählte Merkmal
+    - Quintil-Gruppe immer auf Basis 'insgesamt' (stabile Klassifizierung)
+    - n_kreise = Anzahl gerankter Kreise im jeweiligen Jahr
+    """
+    a = str(ags).replace("'", "")
+    m = str(merkmal).replace("'", "")
+    q = f"""
+        WITH lohn AS (
+            SELECT jahr, ags, kreis, bundesland, median_entgelt,
+                   RANK() OVER (PARTITION BY jahr ORDER BY median_entgelt DESC) AS rang,
+                   COUNT(*) OVER (PARTITION BY jahr)                            AS n_kreise
+            FROM   entgelt_kreise
+            WHERE  merkmal = '{m}' AND median_entgelt IS NOT NULL
+        ),
+        quintil AS (
+            SELECT jahr, ags, quantil_gruppe
+            FROM   entgelt_kreise
+            WHERE  merkmal = 'insgesamt' AND quantil_gruppe IS NOT NULL
+        )
+        SELECT  l.jahr, l.kreis, l.bundesland,
+                l.median_entgelt, q.quantil_gruppe,
+                l.rang, l.n_kreise
+        FROM    lohn l
+        LEFT JOIN quintil q ON l.ags = q.ags AND l.jahr = q.jahr
+        WHERE   l.ags = '{a}'
+        ORDER   BY l.jahr
+    """
+    try:
+        return _con().execute(q).df()
+    except Exception:
+        return pd.DataFrame()
+
+
+def query_kreis_liste() -> pd.DataFrame:
+    """AGS + Kreis + Bundesland (eindeutig) für Kreis-Dropdowns."""
+    q = """
+        SELECT DISTINCT ags, kreis, bundesland
+        FROM   entgelt_kreise
+        WHERE  merkmal = 'insgesamt'
+        ORDER  BY bundesland, kreis
+    """
+    try:
+        return _con().execute(q).df()
+    except Exception:
+        return pd.DataFrame()
+
+
+def query_entgelt_snapshot(jahr: int, merkmal: str = "insgesamt") -> pd.DataFrame:
+    """Entgelt-Querschnitt je Kreis für ein Jahr — Basis für Choropleth-Karte."""
+    m = str(merkmal).replace("'", "")
+    q = f"""
+        SELECT  ags, kreis, bundesland, median_entgelt, quantil_gruppe
+        FROM    entgelt_kreise
+        WHERE   jahr = {int(jahr)} AND merkmal = '{m}'
+        ORDER   BY ags
+    """
+    try:
+        return _con().execute(q).df()
+    except Exception:
+        return pd.DataFrame()

@@ -318,6 +318,31 @@ def fetch_genesis_erwerbstaetige() -> pd.DataFrame:
     df = df[df["value_variable_label"].str.strip() == "Erwerbstätige (Inlandskonzept)"].copy()
     df = df[df["1_variable_attribute_label"].isin(BUNDESLAENDER)].copy()
 
+    # GENESIS 13311-0002 hat ein zweites Merkmal (Wirtschaftszweige WZ08).
+    # Wir wollen nur das "Insgesamt" über alle Branchen pro Bundesland/Jahr.
+    if "2_variable_attribute_label" in df.columns:
+        labels_2 = df["2_variable_attribute_label"].astype(str).str.strip()
+        # Häufige Insgesamt-Bezeichnungen in GENESIS
+        insgesamt_mask = labels_2.str.lower().isin([
+            "insgesamt",
+            "wirtschaftsbereiche zusammen",
+            "alle wirtschaftszweige",
+            "wz08-insgesamt",
+        ])
+        if insgesamt_mask.any():
+            df = df[insgesamt_mask].copy()
+            log.info(f"  Wirtschaftszweig-Filter: 'Insgesamt' → {len(df):,} Zeilen")
+        else:
+            # Fallback: pro Bundesland/Jahr die maximale Zahl behalten
+            # (Total über alle Branchen ist immer die größte Summe)
+            log.warning("  Kein 'Insgesamt'-Wirtschaftszweig erkannt — nutze MAX pro Bundesland/Jahr")
+            df["_v"] = pd.to_numeric(df["value"], errors="coerce")
+            df = (
+                df.sort_values("_v", ascending=False)
+                  .drop_duplicates(subset=["1_variable_attribute_label", "time"], keep="first")
+                  .drop(columns="_v")
+            )
+
     # Einheit aus value_unit lesen und normalisieren
     # GENESIS liefert Erwerbstätige in "1000" (Tausend Personen)
     # value_unit-Spalte enthält die Maßeinheit — wir lesen sie direkt aus
