@@ -1,15 +1,35 @@
 # ─── Zugangsdaten – NIEMALS committen ───────────────────────
 .env
+.envrc
 
 # ─── Python ──────────────────────────────────────────────────
 __pycache__/
-*.py[cod]
+*.py[codz]
 *.pyo
+*$py.class
+*.so
+.Python
+build/
+dist/
+*.egg-info/
+*.egg
+MANIFEST
+
+# ─── Virtuelle Umgebungen ────────────────────────────────────
 .venv/
 venv/
 env/
-*.egg-info/
-.Python
+ENV/
+
+# ─── Tests / Coverage ────────────────────────────────────────
+.tox/
+.nox/
+.coverage
+.coverage.*
+.cache
+.pytest_cache/
+htmlcov/
+.hypothesis/
 
 # ─── Streamlit ───────────────────────────────────────────────
 .streamlit/secrets.toml
@@ -23,20 +43,35 @@ env/
 Thumbs.db
 desktop.ini
 
-# ─── IDE ─────────────────────────────────────────────────────
+# ─── IDE / Editor ────────────────────────────────────────────
 .idea/
 .vscode/
 *.iml
+.spyderproject
+.spyproject
+.ropeproject
 
-# ─── Parquet-Dateien: COMMITTEN (HF Space braucht sie) ───────
-# data/processed/   ← auskommentiert, damit Parquets ins Repo kommen
+# ─── Type-Checker / Linter ───────────────────────────────────
+.mypy_cache/
+.dmypy.json
+.pyre/
+.pytype/
+.ruff_cache/
 
-# ─── Rohdaten (groß, nicht nötig) ────────────────────────────
+# ─── Jupyter ─────────────────────────────────────────────────
+.ipynb_checkpoints/
+
+# ─── Projekt-spezifisch ──────────────────────────────────────
+# Rohdaten (groß, nicht nötig)
 data/raw/
 
-# ─── Logs ────────────────────────────────────────────────────
-*.log
+# Excel-Rohdateien der BA-Entgeltstatistik (groß, nicht im Repo)
 entgelt-*.xlsx
 entgelt-*.xlsm
 entgelt-*.xls
+
+# Großes Kreis-Entgelt-Parquet wird via HuggingFace Hub gezogen
 data/processed/entgelt_kreise.parquet
+
+# Logs
+*.log

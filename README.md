@@ -22,7 +22,7 @@ Team: Bildiren · Höhn · Prokopf | Betreuer: Prof. Dr. Marcus Klemm
 
 ```bash
 # 1. Repository klonen
-git clone https://github.com/DEIN_NAME/arbeitsmarkt-dashboard.git
+git clone https://github.com/Loojz/german-job-market-dashboard.git
 cd arbeitsmarkt-dashboard
 
 # 2. Python-Umgebung einrichten (Python 3.11+ empfohlen)
@@ -197,4 +197,4 @@ mit Quellenangabe frei weiterverwendet werden.
 > Bundesagentur für Arbeit / Statistisches Bundesamt (Destatis) (2024/2025):
 > Arbeitsmarktdaten Deutschland, abgerufen via Arbeitsmarkt-Dashboard,
 > THWS Business School – Bachelor Business Analytics, Sommersemester 2026.
-> Code: https://github.com/DEIN_NAME/arbeitsmarkt-dashboard
+> Code: https://github.com/Loojz/german-job-market-dashboard
