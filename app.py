@@ -420,39 +420,133 @@ if seite == "Überblick":
              "und des Statistischen Bundesamts.",
     )
 
+    with st.expander("Was kannst du hier machen?", expanded=False):
+        st.markdown("""
+**Diese Seite (Überblick)** zeigt die aktuellen bundesweiten Kennzahlen plus eine interaktive Deutschland-Karte (umschaltbar zwischen Bundesländern und Kreisen) und ein Ranking der Bundesländer nach Arbeitslosenquote.
+
+**Weitere Seiten in der linken Navigation:**
+- **Zeitreihen** — monatliche Verläufe von Arbeitslosigkeit und Beschäftigung, nach Bundesland filterbar, mit Mindestlohn-Markierungen. Daten ab 2007 (vor Mindestlohn-Einführung).
+- **Beschäftigung** — sozialversicherungspflichtig Beschäftigte und Erwerbstätige (VGR) nach Bundesland, mit gestapelten Ansichten.
+- **Mindestlohn** — Anpassungshistorie seit 2015, Indexvergleich mit dem allgemeinen Tariflohn (Destatis).
+- **Entgelt nach Kreisen** — Median-Bruttoentgelte für rund 405 Kreise, mit Quintil-Klassifizierung, Gruppen-Vergleich und Kartenvergleich zwischen zwei Zeitpunkten.
+- **Kreis-Story** — Lohnentwicklung eines einzelnen Kreises über die Zeit: in welchem Quintil war er, ist er auf- oder abgestiegen, welche Platzierung unter allen Kreisen.
+- **Download** — alle Datensätze als CSV oder Excel.
+- **Literatur** — kuratierte Auswahl wissenschaftlicher Studien und Policy-Berichte.
+
+**Bedienhinweise:** Im linken Seitenmenü stellst du Bundesländer-Filter und Jahresbereich ein (gilt für Zeitreihen, Beschäftigung und Entgelt). Unten links kannst du zwischen Light- und Dark-Mode wechseln. Bei kleinen Fragezeichen-Icons (`?`) findest du Definitionen und Methodik-Hinweise.
+        """)
+
     snap = _snapshot()
     ml   = _mindestlohn()
 
-    k1, k2, k3, k4 = st.columns(4)
+    # ─ Bundesweite Aggregate ─
     bund_al    = int(snap["arbeitslose_gesamt"].sum())
-    quote_mean = snap["arbeitslosenquote"].dropna().mean()
-    if pd.isna(quote_mean):
-        quote_mean = bund_al / (snap["beschaeftigte_gesamt"].sum() + bund_al) * 100
-    bund_quote = round(float(quote_mean), 1)
+    bund_ub    = (
+        int(snap["unterbeschaeftigung"].sum())
+        if "unterbeschaeftigung" in snap.columns and snap["unterbeschaeftigung"].notna().any()
+        else None
+    )
     bund_be    = snap["beschaeftigte_gesamt"].sum()
+    bund_et    = (
+        snap["erwerbstaetige"].sum()
+        if "erwerbstaetige" in snap.columns and snap["erwerbstaetige"].notna().any()
+        else None
+    )
+    # ALQ deutschlandweit nach BA-Definition: AL / (Erwerbstätige + AL)
+    if bund_et and bund_et > 0:
+        bund_quote = round(bund_al / (bund_et + bund_al) * 100, 1)
+    else:
+        bund_quote = round(bund_al / (bund_be + bund_al) * 100, 1)
     ml_aktuell = float(ml.iloc[-1]["betrag"])
 
-    k1.metric("Arbeitslose gesamt",     f"{bund_al:,}".replace(",", "."))
-    k2.metric("Arbeitslosenquote",      f"{bund_quote:.1f} %")
-    k3.metric("Beschäftigte (svpfl.)",
-              f"{bund_be/1e6:.1f} Mio." if pd.notna(bund_be) else "—")
-    k4.metric("Mindestlohn",            f"€ {ml_aktuell:.2f} / Std.")
+    # ─ Reihe 1: Bestände (groß → klein) ─
+    k1, k2, k3 = st.columns(3)
+    k1.metric(
+        "Erwerbstätige (VGR)",
+        f"{bund_et/1e6:.1f} Mio." if bund_et else "—",
+        help="Alle Erwerbstätigen nach VGR-Konzept (Inlandskonzept), inkl. Selbständige, Beamte und geringfügig Beschäftigte. Quelle: Destatis GENESIS.",
+    )
+    k2.metric(
+        "Sozialvers. Beschäftigte",
+        f"{bund_be/1e6:.1f} Mio." if pd.notna(bund_be) else "—",
+        help="Sozialversicherungspflichtig Beschäftigte (SVB) — Teilmenge der Erwerbstätigen ohne Selbständige, Beamte und ausschließlich geringfügig Beschäftigte. Quelle: BA-Statistik.",
+    )
+    k3.metric(
+        "Arbeitslose gesamt",
+        f"{bund_al:,}".replace(",", "."),
+        help="Registrierte Arbeitslose laut BA-Statistik.",
+    )
+
+    # ─ Reihe 2: Quoten und Marken ─
+    k4, k5, k6 = st.columns(3)
+    k4.metric(
+        "Arbeitslosenquote*",
+        f"{bund_quote:.1f} %",
+        help="Näherung nach BA-Definition: Arbeitslose / (Erwerbstätige + Arbeitslose). Abweichungen zur offiziellen BA-Quote möglich (Stichtage, Inlands- vs. Wohnortprinzip).",
+    )
+    k5.metric(
+        "Unterbeschäftigung",
+        f"{bund_ub:,}".replace(",", ".") if bund_ub else "—",
+        help="Arbeitslose + Personen in arbeitsmarktpolitischen Maßnahmen, kurzfristig arbeitsunfähig etc. Weiter gefasstes Maß als die reine Arbeitslosenzahl. Quelle: BA-Statistik (ohne Kurzarbeit).",
+    )
+    k6.metric(
+        "Mindestlohn",
+        f"€ {ml_aktuell:.2f} / Std.",
+        help="Aktueller gesetzlicher Mindestlohn (BMAS).",
+    )
 
     st.divider()
 
     col_karte, col_rank = st.columns([3, 2])
 
     with col_karte:
-        metrik_k = st.selectbox(
-            "Karte zeigt",
-            ["arbeitslosenquote", "arbeitslose_gesamt", "beschaeftigte_gesamt"],
-            format_func=lambda x: {
-                "arbeitslosenquote":    "Arbeitslosenquote (%)",
-                "arbeitslose_gesamt":   "Arbeitslose (absolut)",
-                "beschaeftigte_gesamt": "Sozialvers. Beschäftigte",
-            }[x],
+        ebene = st.radio(
+            "Ebene",
+            ["Bundesländer", "Kreise"],
+            horizontal=True,
+            help=(
+                "Bundesländer: Arbeitsmarktdaten (ALQ, Beschäftigte, Arbeitslose). "
+                "Kreise: Median-Entgelt (BA-Entgeltstatistik, 405 Kreise)."
+            ),
+            key="ueberblick_ebene",
         )
-        st.plotly_chart(chart_karte(snap, metrik_k), use_container_width=True)
+
+        if ebene == "Bundesländer":
+            metrik_k = st.selectbox(
+                "Karte zeigt",
+                ["arbeitslosenquote", "arbeitslose_gesamt", "beschaeftigte_gesamt"],
+                format_func=lambda x: {
+                    "arbeitslosenquote":    "Arbeitslosenquote (%)",
+                    "arbeitslose_gesamt":   "Arbeitslose (absolut)",
+                    "beschaeftigte_gesamt": "Sozialvers. Beschäftigte",
+                }[x],
+                key="ueberblick_metrik_bl",
+            )
+            st.plotly_chart(chart_karte(snap, metrik_k), use_container_width=True)
+        else:
+            # Kreis-Karte mit Median-Entgelt
+            jahre_k   = sorted(query_entgelt_snapshot(2024, "insgesamt")["ags"].count() and [2015, 2016, 2017, 2018, 2019, 2020, 2021, 2022, 2023, 2024] or [])
+            jahre_k   = [2015, 2016, 2017, 2018, 2019, 2020, 2021, 2022, 2023, 2024]
+            c_jahr, _ = st.columns([1, 2])
+            sel_jahr_k = c_jahr.selectbox(
+                "Jahr", jahre_k, index=len(jahre_k) - 1,
+                key="ueberblick_jahr_kreise",
+            )
+            df_kreis_snap = query_entgelt_snapshot(sel_jahr_k, "insgesamt")
+            if df_kreis_snap.empty:
+                st.info("Keine Kreisdaten für dieses Jahr verfügbar.")
+            else:
+                st.plotly_chart(
+                    chart_karte_kreise(
+                        df_kreis_snap, "median_entgelt",
+                        f"Median-Entgelt {sel_jahr_k} (Vollzeitbeschäftigte)",
+                    ),
+                    use_container_width=True,
+                )
+                st.caption(
+                    f"Quelle: BA-Entgeltstatistik · {len(df_kreis_snap):,} Kreise · "
+                    "Median-Bruttoentgelt Vollzeitbeschäftigter, Stichtag 31.12."
+                )
 
     with col_rank:
         st.subheader("Ranking nach Arbeitslosenquote")
@@ -465,7 +559,11 @@ if seite == "Überblick":
                 )
             },
         )
-        st.caption("* Näherungswert: Arbeitslose / (SVB + Arbeitslose) × 100")
+        st.caption(
+            "* Näherung nach BA-Definition: Arbeitslose / (Erwerbstätige VGR + Arbeitslose) × 100. "
+            "Kleine Abweichungen zur offiziellen BA-Quote möglich (Inlands- vs. Wohnortprinzip, "
+            "jährliche VGR-Stichtage)."
+        )
         dl_buttons(snap, "regional_snapshot", "Snapshot exportieren")
 
     st.markdown(
@@ -1296,7 +1394,13 @@ elif seite == "Kreis-Story":
         f"Platz {int(letztes['jahr'])}",
         f"{int(letztes['rang'])} / {int(letztes['n_kreise'])}",
         delta=f"{rang_diff:+d} Ränge seit {int(erstes['jahr'])}",
-        delta_color="normal",  # weniger Rangzahl = besser, aber positive Differenz = Verbesserung
+        delta_color="normal",
+        help=(
+            "Die Gesamtzahl der Kreise variiert leicht über die Jahre wegen "
+            "Verwaltungsreformen: 2016 wurde Osterode am Harz in den Landkreis "
+            "Göttingen eingegliedert (neuer AGS 03159), 2021 ging Eisenach im "
+            "Wartburgkreis auf. Daher 402 → 401 → 400 Kreise."
+        ),
     )
     m4.metric(
         "Lohnzuwachs absolut",

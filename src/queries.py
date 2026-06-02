@@ -251,24 +251,46 @@ def query_regional_snapshot() -> pd.DataFrame:
                    {gfb_col} AS beschaeftigte_geringfuegig,
                    ROW_NUMBER() OVER (PARTITION BY bundesland ORDER BY datum DESC) AS rn
             FROM   beschaeftigung
+        ),
+        et_raw AS (
+            -- Defensive Aggregation analog query_erwerbstaetige
+            SELECT jahr, bundesland, MAX(erwerbstaetige) AS et_raw
+            FROM   erwerbstaetige
+            GROUP  BY jahr, bundesland
+        ),
+        latest_et AS (
+            SELECT bundesland,
+                   CASE WHEN et_raw < 100000 THEN et_raw * 1000 ELSE et_raw END AS erwerbstaetige,
+                   ROW_NUMBER() OVER (PARTITION BY bundesland ORDER BY jahr DESC) AS rn
+            FROM   et_raw
         )
         SELECT  a.bundesland, a.bl_code, a.datum,
                 a.arbeitslose_gesamt,
                 {ub_col} AS unterbeschaeftigung,
                 b.beschaeftigte_gesamt,
-                b.beschaeftigte_geringfuegig
+                b.beschaeftigte_geringfuegig,
+                e.erwerbstaetige
         FROM    arbeitslose  a
         JOIN    latest_al    l ON a.bundesland = l.bundesland AND a.datum = l.max_datum
         LEFT JOIN latest_be  b ON b.bundesland = a.bundesland AND b.rn = 1
+        LEFT JOIN latest_et  e ON e.bundesland = a.bundesland AND e.rn = 1
         ORDER   BY a.arbeitslose_gesamt DESC
     """
     df = con.execute(q).df()
 
-    # Arbeitslosenquote: AL / (SVB + AL) * 100
-    df["arbeitslosenquote"] = (
-        df["arbeitslose_gesamt"] /
-        (df["beschaeftigte_gesamt"] + df["arbeitslose_gesamt"]) * 100
-    ).round(1)
+    # Arbeitslosenquote = AL / Zivile Erwerbspersonen × 100
+    # Ziv. Erwerbspersonen ≈ Erwerbstätige (VGR) + Arbeitslose
+    # Fallback (falls keine ET-Daten): AL / (SVB + AL) — bekanntermaßen zu hoch
+    df["arbeitslosenquote"] = df.apply(
+        lambda r: (
+            round(r["arbeitslose_gesamt"] / (r["erwerbstaetige"] + r["arbeitslose_gesamt"]) * 100, 1)
+            if pd.notna(r.get("erwerbstaetige")) and r["erwerbstaetige"] > 0
+            else round(r["arbeitslose_gesamt"] / (r["beschaeftigte_gesamt"] + r["arbeitslose_gesamt"]) * 100, 1)
+            if pd.notna(r.get("beschaeftigte_gesamt")) and r["beschaeftigte_gesamt"] > 0
+            else None
+        ),
+        axis=1,
+    )
 
     return df.sort_values("arbeitslosenquote", ascending=False).reset_index(drop=True)
 
