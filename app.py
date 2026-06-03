@@ -436,6 +436,27 @@ if seite == "Überblick":
 **Bedienhinweise:** Im linken Seitenmenü stellst du Bundesländer-Filter und Jahresbereich ein (gilt für Zeitreihen, Beschäftigung und Entgelt). Unten links kannst du zwischen Light- und Dark-Mode wechseln. Bei kleinen Fragezeichen-Icons (`?`) findest du Definitionen und Methodik-Hinweise.
         """)
 
+    with st.expander("Glossar — Fachbegriffe in einem Satz", expanded=False):
+        st.markdown("""
+| Begriff | Bedeutung |
+|---|---|
+| **Arbeitslosenquote (ALQ)** | Arbeitslose ÷ (Erwerbstätige + Arbeitslose) × 100. Offiziell von der BA berechnet, hier als Näherung mit VGR-Erwerbstätigen. |
+| **Arbeitslose** | Beim Arbeitsamt im engeren Sinn (SGB III/II) gemeldet, ohne Personen in Maßnahmen oder Kurzarbeit. |
+| **Unterbeschäftigung** | Arbeitslose **plus** Personen in arbeitsmarktpolitischen Maßnahmen, Trainings und kurzzeitig arbeitsunfähige Arbeitslose. Bessere Annäherung an die tatsächliche Arbeitsmarktlücke. *Ohne* Kurzarbeit — diese ist Beschäftigung. |
+| **SVB / SV-pflichtig Beschäftigte** | Arbeitnehmer mit Beiträgen zur Sozialversicherung (Renten-, Kranken-, Pflege- und Arbeitslosenversicherung). Schließt Beamte, Selbständige und Minijobs **nicht** ein. |
+| **Geringfügig Beschäftigte (GeB)** | Minijob bis 538 €/Monat (Stand 2024) oder kurzfristig. Werden statistisch separat geführt. |
+| **Erwerbstätige (VGR)** | Alle erwerbstätigen Personen am Wohnsitz/Arbeitsort nach Volkswirtschaftlicher Gesamtrechnung: SVB + Beamte + Selbständige + GeB. Quelle: Destatis. |
+| **Median-Entgelt** | Median-Bruttomonatsverdienst SV-pflichtig Vollzeitbeschäftigter (Kerngruppe der BA-Entgeltstatistik). Stichtag 31.12. |
+| **Quintil / Quantil-Gruppe** | Klassifizierung in 5 gleich große Gruppen nach Median-Entgelt: Ärmste 20 % / Unteres Mittel / Mittleres Mittel / Oberes Mittel / Reichste 20 % — je etwa 80 Kreise. |
+| **AGS** | Amtlicher Gemeindeschlüssel (5-stellig auf Kreisebene). Eindeutige Kennung jedes Kreises/jeder kreisfreien Stadt. |
+| **Tariflohnindex** | Index der tariflichen Monatsverdienste (Destatis, Basis 2020 = 100). Misst Tariflohnentwicklung in der Gesamtwirtschaft. |
+| **Mindestlohn** | Gesetzlicher Mindestlohn seit 01.01.2015 (zuletzt 12,82 €/Std., 2025). Beschlossen durch Mindestlohnkommission, festgesetzt per Verordnung. |
+| **Saisonbereinigt** | Statistisch bereinigt um regelmäßige Schwankungen (Sommer/Winter, Ferienzeiten). Erlaubt sauberere Trendaussagen. |
+| **BA** | Bundesagentur für Arbeit (Nürnberg) — Hauptquelle für Arbeitslosen-, Beschäftigten- und Entgeltdaten. |
+| **VGR** | Volkswirtschaftliche Gesamtrechnung — methodischer Rahmen des Statistischen Bundesamts für Erwerbstätige, BIP etc. |
+| **GENESIS** | Destatis-Online-Datenbank (`www-genesis.destatis.de`). Hier holen wir die Erwerbstätigen-Daten. |
+        """)
+
     snap = _snapshot()
     ml   = _mindestlohn()
 
@@ -521,6 +542,11 @@ if seite == "Überblick":
                     "beschaeftigte_gesamt": "Sozialvers. Beschäftigte",
                 }[x],
                 key="ueberblick_metrik_bl",
+                help=(
+                    "Relativ: AL-Quote eignet sich für Vergleiche zwischen großen "
+                    "und kleinen Bundesländern. Absolut: zeigt das Mengen-Gewicht "
+                    "(NRW vs. Saarland sind direkt vergleichbar)."
+                ),
             )
             st.plotly_chart(chart_karte(snap, metrik_k), use_container_width=True)
         else:
@@ -531,6 +557,10 @@ if seite == "Überblick":
             sel_jahr_k = c_jahr.selectbox(
                 "Jahr", jahre_k, index=len(jahre_k) - 1,
                 key="ueberblick_jahr_kreise",
+                help=(
+                    "Stichtag 31.12. des gewählten Jahres. Median-Entgelt der "
+                    "SV-pflichtig Vollzeitbeschäftigten je Kreis."
+                ),
             )
             df_kreis_snap = query_entgelt_snapshot(sel_jahr_k, "insgesamt")
             if df_kreis_snap.empty:
@@ -593,9 +623,19 @@ elif seite == "Zeitreihen":
                 "arbeitslose_gesamt":  "Arbeitslose (absolut)",
                 "unterbeschaeftigung": "Unterbeschäftigung (ohne Kurzarbeit)",
             }[x],
+            help=(
+                "Arbeitslose = im engeren Sinn gemeldete Arbeitslose (SGB III/II). "
+                "Unterbeschäftigung = Arbeitslose + Personen in arbeitsmarktpolitischen "
+                "Maßnahmen + kurzfristig Arbeitsunfähige. Zeigt das tatsächliche "
+                "Stellen-Defizit besser als die reine Arbeitslosenzahl."
+            ),
         )
     with col_ml:
-        zeige_ml = st.toggle("Mindestlohn-Markierungen", value=True)
+        zeige_ml = st.toggle(
+            "Mindestlohn-Markierungen", value=True,
+            help="Zeigt jede Mindestlohn-Anpassung als vertikale Linie im Chart — "
+                 "hilft Effekte auf den Arbeitsmarkt direkt im Zeitverlauf zu erkennen.",
+        )
 
     ml_df = _mindestlohn() if zeige_ml else None
 
@@ -651,6 +691,12 @@ elif seite == "Beschäftigung":
             "Darstellung",
             ["Linienvergleich (alle gewählten Länder)", "Gestapelt (aggregiert)"] + sel_bl[:4],
             horizontal=True,
+            help=(
+                "Linienvergleich: alle gewählten Bundesländer als eigene Linie. "
+                "Gestapelt: SVB + geringfügig Beschäftigte als zwei Schichten, "
+                "über alle gewählten Länder summiert. "
+                "Einzelnes Bundesland: nur dieses Land, Schichten getrennt."
+            ),
         )
 
         if "Linienvergleich" in ansicht:
@@ -743,6 +789,12 @@ elif seite == "Mindestlohn":
             "unterbeschaeftigung": "Unterbeschäftigung (ohne Kurzarbeit)",
         }[x],
         key="ml_sel",
+        help=(
+            "Unterbeschäftigung erfasst über die reinen Arbeitslosen hinaus auch "
+            "Personen in arbeitsmarktpolitischen Maßnahmen, Trainings und kurzzeitig "
+            "arbeitsunfähige Arbeitslose — bessere Annäherung an die tatsächliche "
+            "Arbeitsmarktlücke (ohne Kurzarbeit, da diese Beschäftigung ist)."
+        ),
     )
     df_ts_ml = query_arbeitslose(sel_bl, "2015-01", "2024-12", metrik_ml)
     if not df_ts_ml.empty:
@@ -895,11 +947,31 @@ elif seite == "Entgelt nach Kreisen":
                 "spezialist":     "Spezialist",
                 "experte":        "Experte",
             }.get(x, x),
+            help=(
+                "Untergruppen aus der BA-Entgeltstatistik (Sheet 8.2/16.2): "
+                "demografisch (Geschlecht, Alter, Herkunft), Qualifikation (mit/ohne "
+                "Berufsabschluss, akademisch) oder Anforderungsniveau (Helfer bis "
+                "Experte). Der Median bezieht sich nur auf SV-pflichtig Vollzeit-"
+                "Beschäftigte der jeweiligen Gruppe (Stichtag 31.12.)."
+            ),
         )
     with col_f3:
-        sel_gruppe = st.selectbox("Quantil-Gruppe", alle_gruppen)
+        sel_gruppe = st.selectbox(
+            "Quantil-Gruppe", alle_gruppen,
+            help=(
+                "Klassifizierung der Kreise nach Median-Entgelt (Merkmal Insgesamt). "
+                "Ärmste/Reichste 20 % = je 80 Kreise mit dem niedrigsten bzw. höchsten "
+                "Lohnniveau. Wird pro Jahr neu berechnet (Kreise können wandern)."
+            ),
+        )
     with col_f4:
-        referenzjahr = st.selectbox("Referenzjahr", jahre_ek, index=len(jahre_ek) - 1)
+        referenzjahr = st.selectbox(
+            "Referenzjahr", jahre_ek, index=len(jahre_ek) - 1,
+            help=(
+                "Basis für Ranking, Quintil-Zuordnung und die Karte rechts. "
+                "Zeitreihen unterhalb zeigen weiterhin den ganzen Zeitraum."
+            ),
+        )
 
     df_filtered = df_ek[df_ek["merkmal"] == sel_merkmal].copy()
     if sel_bl_ek:
@@ -1126,6 +1198,11 @@ elif seite == "Entgelt nach Kreisen":
             vj_options,
             index=max(0, len(vj_options) - 1),
             key="vergleichsjahr_map",
+            help=(
+                "Linke Karte zeigt diesen Zeitpunkt, rechte Karte das Referenzjahr "
+                "aus dem oberen Filter. Tabellen darunter listen Kreise mit dem "
+                "stärksten bzw. schwächsten Lohnwachstum dazwischen."
+            ),
         )
 
         col_k1, col_k2 = st.columns(2)
@@ -1343,6 +1420,13 @@ elif seite == "Kreis-Story":
                 "experte":        "Experte",
             }.get(x, x),
             key="ks_merkmal",
+            help=(
+                "Welcher Lohn-Indikator wird angezeigt: gesamter Median, oder "
+                "differenziert nach Geschlecht/Alter/Qualifikation. Die Quintil-"
+                "Zuordnung bleibt immer auf Basis 'Insgesamt' — du siehst also den "
+                "Lohn dieser Untergruppe und kannst gleichzeitig die Position des "
+                "Kreises in der Gesamt-Verteilung erkennen."
+            ),
         )
 
     df_story = query_kreis_story(sel_ags, sel_merkmal_ks)
