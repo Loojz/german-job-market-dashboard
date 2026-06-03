@@ -300,8 +300,8 @@ def format_ranking(df: pd.DataFrame) -> pd.DataFrame:
 # GeoJSON-Quelle: isellsoap/deutschlandGeoJSON, featureidkey = properties.RS (5-stelliger AGS)
 
 _GEOJSON_KREISE_URL = (
-    "https://raw.githubusercontent.com/isellsoap/deutschlandGeoJSON/"
-    "main/4_kreise/4_niedrig.geo.json"
+    "https://raw.githubusercontent.com/m-ad/geofeatures-ags-germany/"
+    "master/geojson/counties.json"
 )
 _GEOJSON_KREISE_CACHE: dict | None = None
 
@@ -354,7 +354,7 @@ def chart_karte_kreise(
 
     fig = px.choropleth(
         df, geojson=geo,
-        locations="ags", featureidkey="properties.RS",
+        locations="ags", featureidkey="id",
         color=metrik,
         color_continuous_scale=[
             [0.0,  "#fff5eb"],
