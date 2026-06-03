@@ -484,6 +484,124 @@ def query_kreis_liste() -> pd.DataFrame:
         return pd.DataFrame()
 
 
+# ── MiLo-Evaluation: flexible Kreiskategorisierung + ALQ-Aggregation ────────
+
+def query_alq_kreise(start_jahr: int = 2007, end_jahr: int = 2025) -> pd.DataFrame:
+    """ALQ je Kreis und Jahr aus BA-Bulk-Excel."""
+    q = f"""
+        SELECT ags, kreis, jahr, alq
+        FROM   alq_kreise
+        WHERE  jahr BETWEEN {int(start_jahr)} AND {int(end_jahr)}
+        ORDER  BY ags, jahr
+    """
+    try:
+        return _con().execute(q).df()
+    except Exception:
+        return pd.DataFrame()
+
+
+def klassifiziere_kreise(
+    df_entgelt_stichjahr: pd.DataFrame,
+    modus: str = "quintil",
+    abs_unter: float | None = None,
+    abs_ober:  float | None = None,
+) -> pd.DataFrame:
+    """
+    Klassifiziert Kreise nach Median-Entgelt-Stichjahr in Gruppen.
+    Modus:
+      'quintil'        → 5 Gruppen je 20 %
+      'top_bottom_10'  → 'Untere 10 %', 'Mittlere 80 %', 'Obere 10 %'
+      'top_bottom_20'  → 'Untere 20 %', 'Mittlere 60 %', 'Obere 20 %'
+      'top_bottom_25'  → 'Untere 25 %', 'Mittlere 50 %', 'Obere 25 %'
+      'absolut'        → '< abs_unter €', 'Mittel', '>= abs_ober €'
+    Erwartet df mit Spalten: ags, kreis, median_entgelt
+    Liefert df mit zusätzlicher Spalte: gruppe
+    """
+    df = df_entgelt_stichjahr.dropna(subset=["median_entgelt"]).copy().sort_values("median_entgelt").reset_index(drop=True)
+    n = len(df)
+    if n == 0:
+        df["gruppe"] = pd.Series(dtype=str)
+        return df
+
+    if modus == "quintil":
+        labels = ["Ärmste 20%", "Unteres Mittel", "Mittleres Mittel",
+                  "Oberes Mittel", "Reichste 20%"]
+        df["gruppe"] = pd.qcut(df["median_entgelt"], q=5, labels=labels,
+                                duplicates="drop")
+    elif modus.startswith("top_bottom_"):
+        pct = int(modus.split("_")[-1])   # 10, 20, 25
+        labels = [f"Untere {pct} %", f"Mittlere {100-2*pct} %", f"Obere {pct} %"]
+        q1 = df["median_entgelt"].quantile(pct/100)
+        q2 = df["median_entgelt"].quantile(1 - pct/100)
+        df["gruppe"] = pd.cut(
+            df["median_entgelt"],
+            bins=[-float("inf"), q1, q2, float("inf")],
+            labels=labels, include_lowest=True,
+        )
+    elif modus == "absolut":
+        if abs_unter is None or abs_ober is None or abs_unter >= abs_ober:
+            raise ValueError("absolut benötigt abs_unter < abs_ober")
+        labels = [f"< {int(abs_unter)} €",
+                  f"{int(abs_unter)}–{int(abs_ober)} €",
+                  f">= {int(abs_ober)} €"]
+        df["gruppe"] = pd.cut(
+            df["median_entgelt"],
+            bins=[-float("inf"), abs_unter, abs_ober, float("inf")],
+            labels=labels, include_lowest=True,
+        )
+    else:
+        raise ValueError(f"Unbekannter Modus: {modus}")
+
+    df["gruppe"] = df["gruppe"].astype(str)
+    return df
+
+
+def query_milo_evaluation(
+    modus: str = "quintil",
+    stichjahr: int = 2014,
+    abs_unter: float | None = None,
+    abs_ober:  float | None = None,
+    merkmal:   str = "insgesamt",
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """
+    Komplette MiLo-Evaluation: klassifiziert Kreise im Stichjahr nach Entgelt,
+    aggregiert ALQ pro Gruppe und Jahr.
+    Returns:
+      (df_aggregat,  df_klassifizierung)
+      df_aggregat: jahr, gruppe, mean_alq, median_alq, n_kreise
+      df_klassifizierung: ags, kreis, median_entgelt, gruppe
+    """
+    # 1. Entgelt-Stichjahr-Snapshot holen — Fallback auf nächstes verfügbares Jahr
+    df_e = query_entgelt_snapshot(stichjahr, merkmal)
+    if df_e.empty:
+        # Suche das früheste verfügbare Jahr >= stichjahr, sonst frühestes überhaupt
+        verfuegbar = _con().execute(
+            "SELECT DISTINCT jahr FROM entgelt_kreise ORDER BY jahr"
+        ).df()["jahr"].tolist()
+        if not verfuegbar:
+            return pd.DataFrame(), pd.DataFrame()
+        fallback = next((j for j in verfuegbar if j >= stichjahr), verfuegbar[0])
+        df_e = query_entgelt_snapshot(fallback, merkmal)
+        if df_e.empty:
+            return pd.DataFrame(), pd.DataFrame()
+    df_class = klassifiziere_kreise(df_e, modus, abs_unter, abs_ober)
+
+    # 2. ALQ-Daten zur Klassifizierung joinen
+    df_alq = query_alq_kreise()
+    if df_alq.empty:
+        return pd.DataFrame(), df_class
+
+    merged = df_alq.merge(df_class[["ags", "gruppe"]], on="ags", how="inner")
+
+    # 3. Pro Gruppe und Jahr aggregieren
+    agg = (
+        merged.groupby(["jahr", "gruppe"], observed=True)["alq"]
+              .agg(mean_alq="mean", median_alq="median", n_kreise="count")
+              .round(2).reset_index()
+    )
+    return agg, df_class
+
+
 def query_entgelt_snapshot(jahr: int, merkmal: str = "insgesamt") -> pd.DataFrame:
     """Entgelt-Querschnitt je Kreis für ein Jahr — Basis für Choropleth-Karte."""
     m = str(merkmal).replace("'", "")

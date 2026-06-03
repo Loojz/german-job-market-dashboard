@@ -374,6 +374,69 @@ def fetch_genesis_erwerbstaetige() -> pd.DataFrame:
 
 
 # ═══════════════════════════════════════════════════════════
+# 2c. ARBEITSLOSENQUOTE AUF KREISEBENE (BA-Statistik Excel)
+# Quelle: statistik.arbeitsagentur.de
+# Bulk-Excel mit allen Kreisen × Jahren 1998-2025
+# Offizielle ALQ "bezogen auf alle zivilen Erwerbspersonen"
+# Gebietsstand: aktuelles Jahr (rückprojiziert)
+# ═══════════════════════════════════════════════════════════
+
+ALQ_KREISE_URL = (
+    "https://statistik.arbeitsagentur.de/Statistikdaten/Detail/Aktuell/"
+    "iiia4/kreise-arbeitslosenquoten/arbeitslosenquoten-k-0-xlsx.xlsx"
+)
+
+
+def fetch_ba_alq_kreise() -> pd.DataFrame:
+    """
+    Arbeitslosenquote je Kreis und Jahr (1998–heute).
+    Quelle: BA-Statistik Bulk-Excel, offizielle Definition
+    (Arbeitslose / zivile Erwerbspersonen × 100).
+    """
+    log.info("BA-Statistik: ALQ-Kreise-Excel holen …")
+    r = requests.get(ALQ_KREISE_URL, headers=BA_HEADERS, timeout=60)
+    r.raise_for_status()
+    raw = pd.read_excel(io.BytesIO(r.content), sheet_name="Jahreszahlen", header=None)
+    log.info(f"  Excel geladen: {raw.shape}")
+
+    # Jahres-Header steht in Zeile 10 (Spalten 1–28: Jahre 1998–2025)
+    jahr_row = raw.iloc[10, 1:].tolist()
+    jahre = [int(float(j)) for j in jahr_row if pd.notna(j)]
+    n_jahre = len(jahre)
+    log.info(f"  Jahre erkannt: {jahre[0]}–{jahre[-1]} ({n_jahre} Jahre)")
+
+    # Datenzeilen ab Zeile 12, Format Spalte 0: "AGS Kreisname"
+    records = []
+    for idx in range(12, len(raw)):
+        region = raw.iat[idx, 0]
+        if pd.isna(region):
+            continue
+        s = str(region).strip()
+        if not s or not s[:1].isdigit():
+            continue
+        # AGS = die ersten 5 Zeichen, Kreisname = Rest
+        parts = s.split(" ", 1)
+        if len(parts) < 2 or len(parts[0]) != 5:
+            continue
+        ags, kreis = parts[0], parts[1]
+        for i, jahr in enumerate(jahre):
+            val = raw.iat[idx, 1 + i]
+            if pd.isna(val):
+                continue
+            try:
+                alq = float(str(val).replace(",", "."))
+            except (ValueError, TypeError):
+                continue
+            records.append({"ags": ags, "kreis": kreis, "jahr": jahr, "alq": alq})
+
+    df = pd.DataFrame(records)
+    df["quelle"]       = "BA-Statistik (arbeitslosenquoten-k-0-xlsx)"
+    df["abgerufen_am"] = date.today().isoformat()
+    log.info(f"  ✓ {len(df):,} Zeilen, {df['ags'].nunique()} Kreise")
+    return df
+
+
+# ═══════════════════════════════════════════════════════════
 # 2b. TARIFLOHNINDEX (Destatis Lange Reihe)
 # Quelle: destatis.de → Tarifverdienste-Tarifbindung
 # Index der tariflichen Monatsverdienste ohne Sonderzahlungen,
@@ -664,6 +727,11 @@ def run_full_update():
 
     save_parquet(get_mindestlohn_df(), "mindestlohn")
     save_parquet(fetch_tariflohnindex(), "tariflohnindex")
+
+    try:
+        save_parquet(fetch_ba_alq_kreise(), "alq_kreise")
+    except Exception as e:
+        log.warning(f"⚠ alq_kreise: {e}")
 
     try:
         save_parquet(fetch_entgelt_kreise(), "entgelt_kreise")

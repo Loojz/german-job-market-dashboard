@@ -748,6 +748,122 @@ def chart_mindestlohn_vs_tariflohn(df: pd.DataFrame, basis_jahr: int = 2015) -> 
     return fig
 
 
+# ─── 12. MiLo-Evaluation: Zeitreihen + Stichtag-Balken ───────────────────────
+
+def _gruppen_farben(gruppen: list[str]) -> dict[str, str]:
+    """Konsistente Farben für die Gruppen-Klassifizierungen."""
+    base = {
+        "Ärmste 20%":       "#1B4F72",
+        "Unteres Mittel":   "#2980B9",
+        "Mittleres Mittel": "#85C1E9",
+        "Oberes Mittel":    "#D4690A",
+        "Reichste 20%":     "#F07000",
+    }
+    # Sortiere die Eingabegruppen nach plausibler Reihenfolge
+    palette = ["#1B4F72", "#2980B9", "#85C1E9", "#D4690A", "#F07000"]
+    out = {}
+    for i, g in enumerate(gruppen):
+        out[g] = base.get(g, palette[i % len(palette)])
+    return out
+
+
+def chart_milo_zeitreihe(
+    df_agg: pd.DataFrame,
+    indikator_label: str = "Arbeitslosenquote (%)",
+    ml_df: pd.DataFrame | None = None,
+) -> go.Figure:
+    """
+    Zeitreihe pro Gruppe (mean_alq) mit optionalen Mindestlohn-Markierungen.
+    df_agg muss Spalten 'jahr','gruppe','mean_alq' haben.
+    """
+    fig = go.Figure()
+    gruppen = list(df_agg["gruppe"].drop_duplicates())
+    farben  = _gruppen_farben(gruppen)
+
+    for g in gruppen:
+        d = df_agg[df_agg["gruppe"] == g].sort_values("jahr")
+        fig.add_trace(go.Scatter(
+            x=d["jahr"], y=d["mean_alq"],
+            name=g, mode="lines+markers",
+            line=dict(color=farben[g], width=2.5),
+            marker=dict(size=7),
+            customdata=d[["n_kreise"]],
+            hovertemplate=(
+                f"<b>{g}</b><br>Jahr: %{{x}}<br>"
+                f"Ø {indikator_label}: %{{y:.2f}}<br>"
+                "n Kreise: %{customdata[0]}<extra></extra>"
+            ),
+        ))
+
+    # Mindestlohn-Markierungen
+    if ml_df is not None and not ml_df.empty:
+        for _, row in ml_df.iterrows():
+            jahr = pd.to_datetime(row["datum"]).year
+            if jahr in df_agg["jahr"].values:
+                fig.add_vline(
+                    x=jahr,
+                    line=dict(color="rgba(240,112,0,0.75)", width=1.2, dash="dot"),
+                    annotation_text=f"€{row['betrag']:.2f}",
+                    annotation_position="top",
+                    annotation_font=dict(size=9, color="rgba(240,112,0,0.95)"),
+                )
+
+    _layout(fig, f"{indikator_label} nach Gruppe", f"Ø {indikator_label}")
+    fig.update_xaxes(dtick=1)
+    return fig
+
+
+def chart_milo_balken_stichtage(
+    df_agg: pd.DataFrame,
+    stichjahre: list[int],
+    indikator_label: str = "Arbeitslosenquote (%)",
+) -> go.Figure:
+    """
+    Gruppierte Säulen zu definierten Stichjahren (z.B. 2014/2015/2020/2025).
+    df_agg muss Spalten 'jahr','gruppe','mean_alq' haben.
+    """
+    d = df_agg[df_agg["jahr"].isin(stichjahre)].copy()
+    if d.empty:
+        fig = go.Figure()
+        _layout(fig, "Stichtagsvergleich — keine Daten")
+        return fig
+
+    gruppen = list(d["gruppe"].drop_duplicates())
+    farben  = _gruppen_farben(gruppen)
+
+    fig = go.Figure()
+    for g in gruppen:
+        sub = d[d["gruppe"] == g].sort_values("jahr")
+        fig.add_trace(go.Bar(
+            x=sub["jahr"].astype(str), y=sub["mean_alq"],
+            name=g, marker_color=farben[g],
+            text=sub["mean_alq"].round(1).astype(str),
+            textposition="outside", textfont=dict(size=10),
+            hovertemplate=f"<b>{g}</b><br>%{{x}}<br>%{{y:.2f}}<extra></extra>",
+        ))
+
+    _layout(fig, f"{indikator_label} zu Stichjahren", indikator_label)
+    fig.update_layout(barmode="group", bargap=0.15, bargroupgap=0.05)
+    return fig
+
+
+def chart_milo_tabelle(df_agg: pd.DataFrame, stichjahre: list[int]) -> pd.DataFrame:
+    """
+    Tabellarischer Überblick: pro Gruppe die ALQ-Werte zu allen Stichjahren
+    plus absolute Veränderung in Prozentpunkten zwischen erstem und letztem.
+    """
+    d = df_agg[df_agg["jahr"].isin(stichjahre)].copy()
+    if d.empty:
+        return pd.DataFrame()
+    pivot = d.pivot(index="gruppe", columns="jahr", values="mean_alq")
+    pivot = pivot.reindex(columns=sorted([j for j in stichjahre if j in pivot.columns]))
+    if len(pivot.columns) >= 2:
+        first, last = pivot.columns[0], pivot.columns[-1]
+        pivot[f"Δ {first}→{last} (pp)"] = (pivot[last] - pivot[first]).round(2)
+    # Hübsche Zahlen-Formatierung
+    return pivot.round(2).reset_index()
+
+
 # Backward-compat Alias
 def chart_armste_vs_rest(df, vergleichs_label="Reichste 20%", highlight_jahr=None):
     """Wrapper für alte Aufrufe — erwartet 'entgelt_armste'/'entgelt_vergleich'-Spalten."""

@@ -23,6 +23,7 @@ from src.queries import (
     query_gruppen_vergleich,
     query_kreis_liste,
     query_kreis_story,
+    query_milo_evaluation,
     query_mindestlohn,
     query_mindestlohn_vs_tariflohn,
     query_quintil_verlauf,
@@ -39,6 +40,9 @@ from src.charts import (
     chart_karte,
     chart_karte_kreise,
     chart_kreis_im_kontext,
+    chart_milo_balken_stichtage,
+    chart_milo_tabelle,
+    chart_milo_zeitreihe,
     chart_mindestlohn,
     chart_mindestlohn_vs_tariflohn,
     chart_quintil_bahn,
@@ -317,6 +321,7 @@ with st.sidebar:
             "Zeitreihen",
             "Beschäftigung",
             "Mindestlohn",
+            "MiLo-Evaluation",
             "Entgelt nach Kreisen",
             "Kreis-Story",
             "Download",
@@ -884,6 +889,227 @@ elif seite == "Mindestlohn":
         </p>
     </div>
     """, unsafe_allow_html=True)
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# MILO-EVALUATION (Kreise nach Entgelt klassifiziert → ALQ-Vergleich)
+# ═══════════════════════════════════════════════════════════════════════════════
+elif seite == "MiLo-Evaluation":
+    hero(
+        eyebrow="MiLo-Evaluation",
+        title="Wer hat vom Mindestlohn profitiert?",
+        body="Kreise werden anhand ihres Lohnniveaus in einem Stichjahr in Gruppen "
+             "eingeteilt — danach vergleichen wir, wie sich die Arbeitslosenquote "
+             "jeder Gruppe über die Zeit entwickelt hat. Konvergieren ärmere Kreise "
+             "zum Niveau der reichen, oder bleibt die Lücke?",
+    )
+
+    with st.expander("Methodik kurz erklärt", expanded=False):
+        st.markdown("""
+**Logik dieser Analyse:**
+
+1. **Klassifizierung:** Alle ~400 deutschen Kreise werden anhand ihres Median-Bruttoentgelts
+   in einem **Stichjahr** in Gruppen sortiert. Du wählst den Modus:
+   - **Quintile** — 5 gleich große Gruppen je 20 %
+   - **Top/Bottom 10/20/25 %** — Drittel-Klassifizierung mit klarem Fokus auf Ränder
+   - **Absolut** — eigene €-Schwellen (z. B. *< 2.500 €* / *2.500–3.500 €* / *> 3.500 €*)
+
+2. **Auswertung:** Für jede so definierte Gruppe wird die Arbeitslosenquote
+   (offiziell von der BA) Jahr für Jahr aggregiert (Mittelwert über alle Kreise der Gruppe).
+
+3. **Ergebnis:** Zeitreihen + Stichtagsvergleich + Tabelle. Die Frage, ob der Mindestlohn
+   wirklich Niedriglohnregionen stärker geholfen hat, kann man hier direkt ablesen —
+   sind die unteren Gruppen relativ stärker gefallen?
+
+> Datenquellen: BA-Statistik (ALQ je Kreis 1998+) und BA-Entgeltstatistik (Median-Entgelt 2015+).
+        """)
+
+    # ── Klassifizierungs-Filter ──────────────────────────────────────────────
+    col_m1, col_m2, col_m3 = st.columns([1.3, 1, 1])
+    with col_m1:
+        modus = st.radio(
+            "Klassifizierungs-Modus",
+            ["Quintile (5 × 20 %)", "Top/Bottom 10 %", "Top/Bottom 20 %",
+             "Top/Bottom 25 %", "Absolute €-Grenzen"],
+            help=(
+                "Quintile: 5 gleich große Gruppen — Standard für ungleichheits-orientierte "
+                "Analysen. Top/Bottom: fokussiert auf Ränder + Mitte. Absolut: für "
+                "Sensitivitätsanalysen mit eigenen Schwellen."
+            ),
+            key="milo_modus",
+        )
+    with col_m2:
+        # Stichjahr — Entgeltdaten gibt es ab 2015
+        stichjahr = st.selectbox(
+            "Stichjahr für Klassifizierung",
+            list(range(2015, 2025)),
+            index=0,
+            help=(
+                "Jahr, an dem die Gruppen festgelegt werden. Ein Kreis kann zwar "
+                "über die Zeit das Quintil wechseln — für diese Analyse bleibt die "
+                "Gruppen-Zuordnung jedoch im Stichjahr eingefroren ('Cohort-Logik')."
+            ),
+            key="milo_stichjahr",
+        )
+    with col_m3:
+        merkmal_milo = st.selectbox(
+            "Entgelt-Merkmal",
+            ["insgesamt", "maenner", "frauen", "u25", "55plus",
+             "ohne_abschluss", "mit_abschluss", "akademisch"],
+            format_func=lambda x: {
+                "insgesamt":      "Insgesamt",
+                "maenner":        "Männer",
+                "frauen":         "Frauen",
+                "u25":            "Unter 25 Jahre",
+                "55plus":         "55 Jahre und älter",
+                "ohne_abschluss": "Ohne Berufsabschluss",
+                "mit_abschluss":  "Mit Berufsabschluss",
+                "akademisch":     "Akademisch",
+            }.get(x, x),
+            help=(
+                "Welche Lohngruppe bestimmt die Klassifizierung? 'Insgesamt' ist der "
+                "Standard — alternativ z. B. nur 'Ohne Berufsabschluss' falls man "
+                "MiLo-Betroffenheit gezielter abbilden will."
+            ),
+            key="milo_merkmal",
+        )
+
+    # Modus-Konfiguration
+    abs_unter, abs_ober = None, None
+    if modus == "Quintile (5 × 20 %)":
+        modus_code = "quintil"
+    elif modus == "Top/Bottom 10 %":
+        modus_code = "top_bottom_10"
+    elif modus == "Top/Bottom 20 %":
+        modus_code = "top_bottom_20"
+    elif modus == "Top/Bottom 25 %":
+        modus_code = "top_bottom_25"
+    else:  # Absolut
+        modus_code = "absolut"
+        col_au, col_ao = st.columns(2)
+        with col_au:
+            abs_unter = st.number_input(
+                "Untergrenze (€ Median-Monatsentgelt)",
+                min_value=1500, max_value=5000, value=2500, step=100,
+                help="Kreise unterhalb dieser Schwelle gelten als 'Niedriglohnregion'.",
+            )
+        with col_ao:
+            abs_ober = st.number_input(
+                "Obergrenze (€ Median-Monatsentgelt)",
+                min_value=2000, max_value=6000, value=3500, step=100,
+                help="Kreise oberhalb dieser Schwelle gelten als 'Hochlohnregion'.",
+            )
+        if abs_unter >= abs_ober:
+            st.error("Untergrenze muss kleiner als Obergrenze sein.")
+            st.stop()
+
+    # ── Berechnung ───────────────────────────────────────────────────────────
+    @st.cache_data(ttl=3600, show_spinner="MiLo-Evaluation berechnen …")
+    def _milo_run(modus_code, stichjahr, abs_unter, abs_ober, merkmal_milo):
+        return query_milo_evaluation(modus_code, stichjahr, abs_unter, abs_ober, merkmal_milo)
+
+    agg_milo, klass_milo = _milo_run(modus_code, stichjahr, abs_unter, abs_ober, merkmal_milo)
+
+    if agg_milo.empty:
+        st.warning("Keine Daten für diese Konfiguration. Andere Klassifizierung wählen.")
+        st.stop()
+
+    st.divider()
+
+    # ── Klassifizierungs-Zusammenfassung ─────────────────────────────────────
+    st.subheader("Klassifizierungs-Zusammenfassung")
+    gruppen_counts = klass_milo.groupby("gruppe", observed=True).agg(
+        n_kreise=("ags", "count"),
+        median_entgelt_ø=("median_entgelt", "mean"),
+    ).round(0).reset_index()
+
+    cols_gruppen = st.columns(len(gruppen_counts))
+    for i, row in gruppen_counts.iterrows():
+        cols_gruppen[i].metric(
+            row["gruppe"],
+            f"{int(row['n_kreise'])} Kreise",
+            f"Ø {int(row['median_entgelt_ø']):,} €".replace(",", "."),
+            delta_color="off",
+        )
+
+    st.divider()
+
+    # ── Zeitreihe ────────────────────────────────────────────────────────────
+    st.subheader("Zeitreihe — Arbeitslosenquote nach Gruppe")
+    st.caption(
+        "Ø ALQ aller Kreise einer Gruppe. Vertikale Linien markieren "
+        "Mindestlohn-Anpassungen. Schließt sich die Lücke?"
+    )
+    ml_for_chart = _mindestlohn()
+    st.plotly_chart(
+        chart_milo_zeitreihe(agg_milo, "Arbeitslosenquote (%)", ml_for_chart),
+        use_container_width=True,
+    )
+
+    st.divider()
+
+    # ── Stichtagsvergleich ───────────────────────────────────────────────────
+    st.subheader("Stichtagsvergleich (Säulen)")
+    st.caption("Wähle Jahre für den direkten Vergleich — Default: vor MiLo, Einführung, nach Corona, aktuell.")
+    jahre_verfuegbar = sorted(agg_milo["jahr"].unique())
+    default_stichjahre = [j for j in [2014, 2015, 2020, 2025] if j in jahre_verfuegbar]
+    if not default_stichjahre:
+        default_stichjahre = jahre_verfuegbar[:4]
+
+    sel_stichjahre = st.multiselect(
+        "Stichjahre",
+        jahre_verfuegbar,
+        default=default_stichjahre,
+        help="Üblich: 2014 (vor MiLo), 2015 (Einführung), 2020 (Pre-Corona), 2025 (aktuell).",
+    )
+    if sel_stichjahre:
+        st.plotly_chart(
+            chart_milo_balken_stichtage(agg_milo, sorted(sel_stichjahre), "Arbeitslosenquote (%)"),
+            use_container_width=True,
+        )
+
+    st.divider()
+
+    # ── Tabellarischer Überblick ─────────────────────────────────────────────
+    st.subheader("Tabellarischer Überblick")
+    st.caption("Ø ALQ pro Gruppe und Stichjahr + absolute Veränderung in Prozentpunkten.")
+    if sel_stichjahre:
+        tab = chart_milo_tabelle(agg_milo, sorted(sel_stichjahre))
+        st.dataframe(tab, use_container_width=True, hide_index=True)
+
+        # Story-Caption
+        if len(sel_stichjahre) >= 2 and "Δ " in tab.columns[-1]:
+            delta_col = tab.columns[-1]
+            min_g = tab.loc[tab[delta_col].idxmin()]
+            max_g = tab.loc[tab[delta_col].idxmax()]
+            differenz = min_g[delta_col] - max_g[delta_col]
+            if differenz < -1.0:  # min ist deutlich niedriger (= mehr gefallen)
+                st.caption(
+                    f"**Befund:** Gruppe **{min_g['gruppe']}** hat ihre ALQ um "
+                    f"{abs(min_g[delta_col]):.1f} pp reduziert — Gruppe "
+                    f"**{max_g['gruppe']}** dagegen nur um {abs(max_g[delta_col]):.1f} pp "
+                    f"(bzw. +{max_g[delta_col]:.1f} pp gestiegen). "
+                    f"Die regionale Konvergenz zwischen den Lohngruppen beträgt "
+                    f"**{abs(differenz):.1f} Prozentpunkte** — Hinweis auf eine "
+                    f"differenzierte Wirkung von Mindestlohn und Konjunktur auf "
+                    f"Niedrig- vs. Hochlohnregionen."
+                )
+
+    st.divider()
+
+    # ── Downloads ────────────────────────────────────────────────────────────
+    dl_buttons(agg_milo, f"milo_eval_aggregat_{modus_code}_{stichjahr}", "Aggregat exportieren")
+    dl_buttons(klass_milo[["ags", "kreis", "bundesland", "median_entgelt", "gruppe"]],
+               f"milo_eval_klassifizierung_{modus_code}_{stichjahr}",
+               "Klassifizierung exportieren")
+
+    st.markdown(
+        '<p class="source-note">ALQ: Bundesagentur für Arbeit — '
+        '"Arbeitslosenquote bezogen auf alle zivilen Erwerbspersonen" (Jahresdurchschnitt). '
+        'Entgelt-Klassifizierung: BA-Entgeltstatistik (Vollzeitbeschäftigte Kerngruppe). '
+        'Beide Datenlizenz Deutschland 2.0.</p>',
+        unsafe_allow_html=True,
+    )
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
