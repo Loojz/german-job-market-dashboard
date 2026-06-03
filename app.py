@@ -40,6 +40,7 @@ from src.charts import (
     chart_karte,
     chart_karte_kreise,
     chart_kreis_im_kontext,
+    chart_kreise_topbottom_bar,
     chart_milo_balken_stichtage,
     chart_milo_tabelle,
     chart_milo_zeitreihe,
@@ -427,13 +428,13 @@ if seite == "Überblick":
 
     with st.expander("Was kannst du hier machen?", expanded=False):
         st.markdown("""
-**Diese Seite (Überblick)** zeigt die aktuellen bundesweiten Kennzahlen plus eine interaktive Deutschland-Karte (umschaltbar zwischen Bundesländern und Kreisen) und ein Ranking der Bundesländer nach Arbeitslosenquote.
+**Diese Seite (Überblick)** zeigt die aktuellen bundesweiten Kennzahlen plus eine interaktive Deutschland-Karte (Bundesländer) bzw. Top/Bottom-Bar-Chart (Kreise) und ein Ranking der Bundesländer nach Arbeitslosenquote.
 
 **Weitere Seiten in der linken Navigation:**
 - **Zeitreihen** — monatliche Verläufe von Arbeitslosigkeit und Beschäftigung, nach Bundesland filterbar, mit Mindestlohn-Markierungen. Daten ab 2007 (vor Mindestlohn-Einführung).
 - **Beschäftigung** — sozialversicherungspflichtig Beschäftigte und Erwerbstätige (VGR) nach Bundesland, mit gestapelten Ansichten.
 - **Mindestlohn** — Anpassungshistorie seit 2015, Indexvergleich mit dem allgemeinen Tariflohn (Destatis).
-- **Entgelt nach Kreisen** — Median-Bruttoentgelte für rund 405 Kreise, mit Quintil-Klassifizierung, Gruppen-Vergleich und Kartenvergleich zwischen zwei Zeitpunkten.
+- **Entgelt nach Kreisen** — Median-Bruttoentgelte für rund 405 Kreise, mit Quintil-Klassifizierung, Gruppen-Vergleich und Stichtagsvergleich zwischen zwei Zeitpunkten.
 - **Kreis-Story** — Lohnentwicklung eines einzelnen Kreises über die Zeit: in welchem Quintil war er, ist er auf- oder abgestiegen, welche Platzierung unter allen Kreisen.
 - **Download** — alle Datensätze als CSV oder Excel.
 - **Literatur** — kuratierte Auswahl wissenschaftlicher Studien und Policy-Berichte.
@@ -531,8 +532,10 @@ if seite == "Überblick":
             ["Bundesländer", "Kreise"],
             horizontal=True,
             help=(
-                "Bundesländer: Arbeitsmarktdaten (ALQ, Beschäftigte, Arbeitslose). "
-                "Kreise: Median-Entgelt (BA-Entgeltstatistik, 405 Kreise)."
+                "Bundesländer: Choropleth-Karte mit Arbeitsmarktdaten (ALQ, "
+                "Beschäftigte, Arbeitslose). "
+                "Kreise: Top/Bottom-Bar-Chart der Median-Entgelte aus der "
+                "BA-Entgeltstatistik."
             ),
             key="ueberblick_ebene",
         )
@@ -555,8 +558,7 @@ if seite == "Überblick":
             )
             st.plotly_chart(chart_karte(snap, metrik_k), use_container_width=True)
         else:
-            # Kreis-Karte mit Median-Entgelt
-            jahre_k   = sorted(query_entgelt_snapshot(2024, "insgesamt")["ags"].count() and [2015, 2016, 2017, 2018, 2019, 2020, 2021, 2022, 2023, 2024] or [])
+            # Top/Bottom-Kreise nach Median-Entgelt (Bar-Chart-Variante)
             jahre_k   = [2015, 2016, 2017, 2018, 2019, 2020, 2021, 2022, 2023, 2024]
             c_jahr, _ = st.columns([1, 2])
             sel_jahr_k = c_jahr.selectbox(
@@ -572,15 +574,16 @@ if seite == "Überblick":
                 st.info("Keine Kreisdaten für dieses Jahr verfügbar.")
             else:
                 st.plotly_chart(
-                    chart_karte_kreise(
-                        df_kreis_snap, "median_entgelt",
-                        f"Median-Entgelt {sel_jahr_k} (Vollzeitbeschäftigte)",
+                    chart_kreise_topbottom_bar(
+                        df_kreis_snap, "median_entgelt", n=15,
+                        titel=f"Top 15 und Bottom 15 Kreise — Median-Entgelt {sel_jahr_k}",
                     ),
                     use_container_width=True,
                 )
                 st.caption(
                     f"Quelle: BA-Entgeltstatistik · {len(df_kreis_snap):,} Kreise · "
-                    "Median-Bruttoentgelt Vollzeitbeschäftigter, Stichtag 31.12."
+                    "Median-Bruttoentgelt Vollzeitbeschäftigter, Stichtag 31.12. · "
+                    "Orange = Top 15 (höchste Löhne), Navy = Bottom 15."
                 )
 
     with col_rank:
@@ -1410,24 +1413,26 @@ elif seite == "Entgelt nach Kreisen":
 
     st.divider()
 
-    # ── 3. Kartenvergleich ────────────────────────────────────────────────────
-    st.subheader("Kartenvergleich — zwei Zeitpunkte")
+    # ── 3. Stichtagsvergleich (Top/Bottom Bar-Charts) ────────────────────────
+    st.subheader("Stichtagsvergleich — zwei Zeitpunkte")
     st.caption(
-        "Medianentgelt auf Kreisebene im direkten Vergleich. "
-        "Dunklere Farbe = höheres Lohnniveau."
+        "Top 15 und Bottom 15 Kreise pro Zeitpunkt. "
+        "Orange = höchste Löhne · Navy = niedrigste Löhne. "
+        "Im direkten Vergleich sichtbar: welche Kreise auf- oder abgestiegen sind."
     )
 
     vj_options = [y for y in jahre_ek if y < referenzjahr]
     if vj_options:
         vergleichsjahr = st.selectbox(
-            "Vergleichsjahr (linke Karte)",
+            "Vergleichsjahr (linke Seite)",
             vj_options,
             index=max(0, len(vj_options) - 1),
             key="vergleichsjahr_map",
             help=(
-                "Linke Karte zeigt diesen Zeitpunkt, rechte Karte das Referenzjahr "
-                "aus dem oberen Filter. Tabellen darunter listen Kreise mit dem "
-                "stärksten bzw. schwächsten Lohnwachstum dazwischen."
+                "Links: Top/Bottom-Kreise im gewählten Vergleichsjahr. "
+                "Rechts: dieselbe Darstellung im Referenzjahr aus dem oberen Filter. "
+                "Tabellen darunter listen Kreise mit dem stärksten bzw. schwächsten "
+                "Lohnwachstum dazwischen."
             ),
         )
 
@@ -1438,8 +1443,10 @@ elif seite == "Entgelt nach Kreisen":
                 df_k1 = df_k1[df_k1["bundesland"].isin(sel_bl_ek)]
             if not df_k1.empty:
                 st.plotly_chart(
-                    chart_karte_kreise(df_k1, "median_entgelt",
-                                       f"Medianentgelt {vergleichsjahr}"),
+                    chart_kreise_topbottom_bar(
+                        df_k1, "median_entgelt", n=15,
+                        titel=f"Medianentgelt {vergleichsjahr} — Top 15 / Bottom 15",
+                    ),
                     use_container_width=True,
                 )
         with col_k2:
@@ -1448,8 +1455,10 @@ elif seite == "Entgelt nach Kreisen":
                 df_k2 = df_k2[df_k2["bundesland"].isin(sel_bl_ek)]
             if not df_k2.empty:
                 st.plotly_chart(
-                    chart_karte_kreise(df_k2, "median_entgelt",
-                                       f"Medianentgelt {referenzjahr}"),
+                    chart_kreise_topbottom_bar(
+                        df_k2, "median_entgelt", n=15,
+                        titel=f"Medianentgelt {referenzjahr} — Top 15 / Bottom 15",
+                    ),
                     use_container_width=True,
                 )
 

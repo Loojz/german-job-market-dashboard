@@ -354,7 +354,7 @@ def chart_karte_kreise(
 
     fig = px.choropleth(
         df, geojson=geo,
-        locations="ags", featureidkey="id",
+        locations="ags", featureidkey="properties.ags",
         color=metrik,
         color_continuous_scale=[
             [0.0,  "#fff5eb"],
@@ -745,6 +745,58 @@ def chart_mindestlohn_vs_tariflohn(df: pd.DataFrame, basis_jahr: int = 2015) -> 
     )
     fig.update_yaxes(tickformat=".0f")
     fig.update_xaxes(dtick=1)
+    return fig
+
+
+# ─── 11b. Kreise als Top/Bottom-Bar-Chart (Choropleth-Ersatz) ────────────────
+
+def chart_kreise_topbottom_bar(
+    df: pd.DataFrame,
+    metrik: str = "median_entgelt",
+    n: int = 15,
+    titel: str = "",
+) -> go.Figure:
+    """
+    Sortierte Top-N + Bottom-N Bar-Visualisierung als Choropleth-Ersatz.
+    df muss Spalten 'kreis','bundesland', {metrik} haben.
+    """
+    if df.empty or metrik not in df.columns:
+        fig = go.Figure()
+        _layout(fig, titel or "Keine Daten")
+        return fig
+
+    d = df.dropna(subset=[metrik]).sort_values(metrik, ascending=False)
+    top = d.head(n)
+    bot = d.tail(n)
+    sel = pd.concat([top, bot]).drop_duplicates(subset="kreis")
+    # Für Anzeige aufsteigend (kleinste oben? lieber sortiert: Top oben, Bottom unten)
+    sel = sel.sort_values(metrik)
+
+    label = {
+        "median_entgelt":    "Median €/Monat",
+        "arbeitslosenquote": "AL-Quote (%)",
+        "alq":               "AL-Quote (%)",
+    }.get(metrik, metrik)
+
+    # Farbgebung: oben (höchste) orange, unten (niedrigste) navy
+    farben = [
+        _THWS_ORANGE if i >= len(sel) - n else "#1B4F72"
+        for i in range(len(sel))
+    ]
+
+    fig = go.Figure(go.Bar(
+        x=sel[metrik], y=sel["kreis"] + " (" + sel["bundesland"] + ")",
+        orientation="h",
+        marker=dict(color=farben),
+        text=sel[metrik].round(0).astype(int).astype(str),
+        textposition="outside",
+        textfont=dict(size=10),
+        hovertemplate="<b>%{y}</b><br>" + label + ": %{x:,.0f}<extra></extra>",
+    ))
+    _layout(fig, titel or f"Top {n} und Bottom {n} Kreise", label)
+    fig.update_yaxes(tickfont=dict(size=10))
+    fig.update_xaxes(tickformat=",.0f")
+    fig.update_layout(height=max(450, len(sel) * 22), showlegend=False)
     return fig
 
 
