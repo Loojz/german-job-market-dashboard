@@ -239,6 +239,28 @@ def query_regional_snapshot() -> pd.DataFrame:
     al_cols  = [r[0] for r in con.execute("DESCRIBE arbeitslose").fetchall()]
     ub_col   = "unterbeschaeftigung" if "unterbeschaeftigung" in al_cols else "NULL"
 
+    # ALQ aus alq_kreise (offizielle BA-Werte je Kreis) auf Bundesland aggregieren?
+    has_alq_kreise = "alq_kreise" in [
+        r[0] for r in con.execute("SHOW TABLES").fetchall()
+    ]
+
+    if has_alq_kreise:
+        alq_bl_cte = """,
+        latest_alq_jahr AS (SELECT MAX(jahr) AS j FROM alq_kreise),
+        alq_bl AS (
+            SELECT SUBSTR(ags, 1, 2) AS bl_code,
+                   ROUND(AVG(alq), 1) AS alq_offiziell
+            FROM   alq_kreise
+            WHERE  jahr = (SELECT j FROM latest_alq_jahr)
+            GROUP  BY SUBSTR(ags, 1, 2)
+        )"""
+        alq_select   = ", q.alq_offiziell"
+        alq_join     = "LEFT JOIN alq_bl q ON q.bl_code = LPAD(CAST(a.bl_code AS VARCHAR), 2, '0')"
+    else:
+        alq_bl_cte = ""
+        alq_select = ", NULL AS alq_offiziell"
+        alq_join   = ""
+
     q = f"""
         WITH latest_al AS (
             SELECT bundesland, bl_code, MAX(datum) AS max_datum
@@ -263,34 +285,38 @@ def query_regional_snapshot() -> pd.DataFrame:
                    CASE WHEN et_raw < 100000 THEN et_raw * 1000 ELSE et_raw END AS erwerbstaetige,
                    ROW_NUMBER() OVER (PARTITION BY bundesland ORDER BY jahr DESC) AS rn
             FROM   et_raw
-        )
+        ){alq_bl_cte}
         SELECT  a.bundesland, a.bl_code, a.datum,
                 a.arbeitslose_gesamt,
                 {ub_col} AS unterbeschaeftigung,
                 b.beschaeftigte_gesamt,
                 b.beschaeftigte_geringfuegig,
                 e.erwerbstaetige
+                {alq_select}
         FROM    arbeitslose  a
         JOIN    latest_al    l ON a.bundesland = l.bundesland AND a.datum = l.max_datum
         LEFT JOIN latest_be  b ON b.bundesland = a.bundesland AND b.rn = 1
         LEFT JOIN latest_et  e ON e.bundesland = a.bundesland AND e.rn = 1
+        {alq_join}
         ORDER   BY a.arbeitslose_gesamt DESC
     """
     df = con.execute(q).df()
 
-    # Arbeitslosenquote = AL / Zivile Erwerbspersonen × 100
-    # Ziv. Erwerbspersonen ≈ Erwerbstätige (VGR) + Arbeitslose
-    # Fallback (falls keine ET-Daten): AL / (SVB + AL) — bekanntermaßen zu hoch
-    df["arbeitslosenquote"] = df.apply(
-        lambda r: (
-            round(r["arbeitslose_gesamt"] / (r["erwerbstaetige"] + r["arbeitslose_gesamt"]) * 100, 1)
-            if pd.notna(r.get("erwerbstaetige")) and r["erwerbstaetige"] > 0
-            else round(r["arbeitslose_gesamt"] / (r["beschaeftigte_gesamt"] + r["arbeitslose_gesamt"]) * 100, 1)
-            if pd.notna(r.get("beschaeftigte_gesamt")) and r["beschaeftigte_gesamt"] > 0
-            else None
-        ),
-        axis=1,
-    )
+    # Arbeitslosenquote in dieser Reihenfolge:
+    #   1. Offizielle BA-Werte (Mittel der Kreis-ALQs aus alq_kreise)
+    #   2. Näherung mit VGR-Erwerbstätigen
+    #   3. Notfall-Näherung mit SVB
+    def _quote(row):
+        if pd.notna(row.get("alq_offiziell")):
+            return float(row["alq_offiziell"])
+        al = row["arbeitslose_gesamt"]
+        if pd.notna(row.get("erwerbstaetige")) and row["erwerbstaetige"] > 0:
+            return round(al / (row["erwerbstaetige"] + al) * 100, 1)
+        if pd.notna(row.get("beschaeftigte_gesamt")) and row["beschaeftigte_gesamt"] > 0:
+            return round(al / (row["beschaeftigte_gesamt"] + al) * 100, 1)
+        return None
+
+    df["arbeitslosenquote"] = df.apply(_quote, axis=1)
 
     return df.sort_values("arbeitslosenquote", ascending=False).reset_index(drop=True)
 

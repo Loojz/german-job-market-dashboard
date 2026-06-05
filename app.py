@@ -446,7 +446,7 @@ if seite == "Überblick":
         st.markdown("""
 | Begriff | Bedeutung |
 |---|---|
-| **Arbeitslosenquote (ALQ)** | Arbeitslose ÷ (Erwerbstätige + Arbeitslose) × 100. Offiziell von der BA berechnet, hier als Näherung mit VGR-Erwerbstätigen. |
+| **Arbeitslosenquote (ALQ)** | Arbeitslose ÷ zivile Erwerbspersonen × 100. Auf Kreisebene direkt von der BA, auf Bundesland aggregiert als arithmetisches Mittel über alle Kreise. |
 | **Arbeitslose** | Beim Arbeitsamt im engeren Sinn (SGB III/II) gemeldet, ohne Personen in Maßnahmen oder Kurzarbeit. |
 | **Unterbeschäftigung** | Arbeitslose **plus** Personen in arbeitsmarktpolitischen Maßnahmen, Trainings und kurzzeitig arbeitsunfähige Arbeitslose. Bessere Annäherung an die tatsächliche Arbeitsmarktlücke. *Ohne* Kurzarbeit — diese ist Beschäftigung. |
 | **SVB / SV-pflichtig Beschäftigte** | Arbeitnehmer mit Beiträgen zur Sozialversicherung (Renten-, Kranken-, Pflege- und Arbeitslosenversicherung). Schließt Beamte, Selbständige und Minijobs **nicht** ein. |
@@ -479,8 +479,11 @@ if seite == "Überblick":
         if "erwerbstaetige" in snap.columns and snap["erwerbstaetige"].notna().any()
         else None
     )
-    # ALQ deutschlandweit nach BA-Definition: AL / (Erwerbstätige + AL)
-    if bund_et and bund_et > 0:
+    # ALQ deutschlandweit: arithmetisches Mittel der offiziellen BA-Kreis-ALQs
+    # (in snap["arbeitslosenquote"] schon aggregiert auf BL-Ebene), Fallback VGR.
+    if "arbeitslosenquote" in snap.columns and snap["arbeitslosenquote"].notna().any():
+        bund_quote = round(snap["arbeitslosenquote"].dropna().mean(), 1)
+    elif bund_et and bund_et > 0:
         bund_quote = round(bund_al / (bund_et + bund_al) * 100, 1)
     else:
         bund_quote = round(bund_al / (bund_be + bund_al) * 100, 1)
@@ -509,7 +512,7 @@ if seite == "Überblick":
     k4.metric(
         "Arbeitslosenquote*",
         f"{bund_quote:.1f} %",
-        help="Näherung nach BA-Definition: Arbeitslose / (Erwerbstätige + Arbeitslose). Abweichungen zur offiziellen BA-Quote möglich (Stichtage, Inlands- vs. Wohnortprinzip).",
+        help="Arithmetisches Mittel der offiziellen BA-Kreis-Arbeitslosenquoten (Jahresdurchschnitt). Stadtstaaten exakt, Flächenländer minimale Abweichung möglich.",
     )
     k5.metric(
         "Unterbeschäftigung",
@@ -598,9 +601,10 @@ if seite == "Überblick":
             },
         )
         st.caption(
-            "* Näherung nach BA-Definition: Arbeitslose / (Erwerbstätige VGR + Arbeitslose) × 100. "
-            "Kleine Abweichungen zur offiziellen BA-Quote möglich (Inlands- vs. Wohnortprinzip, "
-            "jährliche VGR-Stichtage)."
+            "* Offizielle BA-Arbeitslosenquote, aggregiert aus den Kreis-Werten "
+            "(arithmetisches Mittel der Kreise je Bundesland). Stadtstaaten exakt; "
+            "Flächenländer mit ≤ 1 pp Abweichung möglich, da die Aggregation alle "
+            "Kreise gleich gewichtet."
         )
         dl_buttons(snap, "regional_snapshot", "Snapshot exportieren")
 
