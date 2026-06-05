@@ -479,10 +479,21 @@ if seite == "Überblick":
         if "erwerbstaetige" in snap.columns and snap["erwerbstaetige"].notna().any()
         else None
     )
-    # ALQ deutschlandweit: arithmetisches Mittel der offiziellen BA-Kreis-ALQs
-    # (in snap["arbeitslosenquote"] schon aggregiert auf BL-Ebene), Fallback VGR.
-    if "arbeitslosenquote" in snap.columns and snap["arbeitslosenquote"].notna().any():
-        bund_quote = round(snap["arbeitslosenquote"].dropna().mean(), 1)
+    # ALQ deutschlandweit: gewichteter Mittelwert der BL-Quoten mit
+    # Erwerbstätigen als Gewicht (kleine BL ziehen sonst nach oben).
+    # Wir nehmen die offizielle BA-Quote, die in snap["arbeitslosenquote"] steht.
+    if (
+        "arbeitslosenquote" in snap.columns
+        and "erwerbstaetige"   in snap.columns
+        and snap["arbeitslosenquote"].notna().any()
+        and snap["erwerbstaetige"].notna().any()
+    ):
+        valid = snap.dropna(subset=["arbeitslosenquote", "erwerbstaetige"])
+        bund_quote = round(
+            (valid["arbeitslosenquote"] * valid["erwerbstaetige"]).sum()
+            / valid["erwerbstaetige"].sum(),
+            1,
+        )
     elif bund_et and bund_et > 0:
         bund_quote = round(bund_al / (bund_et + bund_al) * 100, 1)
     else:
