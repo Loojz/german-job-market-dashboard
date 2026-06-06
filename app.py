@@ -598,18 +598,21 @@ if seite == "Überblick":
             # Beide Datensätze laden und mergen (Hover zeigt dann beide Werte)
             df_alq_k     = query_alq_kreise(jahr=sel_jahr_k)
             df_entgelt_k = query_entgelt_snapshot(sel_jahr_k, "insgesamt")
+            # bundesland kommt immer aus dem Entgelt-Snapshot — leere
+            # bundesland-Spalte aus df_alq_k droppen, damit der Merge keine
+            # _x/_y-Suffixe erzeugt.
+            df_alq_k_slim = df_alq_k.drop(columns=["bundesland"], errors="ignore")
             if metrik_kreise == "arbeitslosenquote":
-                df_kreis_snap = df_alq_k.merge(
+                df_kreis_snap = df_alq_k_slim.merge(
                     df_entgelt_k[["ags", "bundesland", "median_entgelt"]],
                     on="ags", how="left",
                 )
-                # bundesland aus dem Entgelt-Snapshot übernehmen
                 df_kreis_snap["bundesland"] = (
-                    df_kreis_snap["bundesland"].fillna("").replace("", "—")
+                    df_kreis_snap["bundesland"].fillna("—")
                 )
             else:
                 df_kreis_snap = df_entgelt_k.merge(
-                    df_alq_k[["ags", "arbeitslosenquote"]],
+                    df_alq_k_slim[["ags", "arbeitslosenquote"]],
                     on="ags", how="left",
                 )
 
