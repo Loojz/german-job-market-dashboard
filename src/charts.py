@@ -336,10 +336,14 @@ def chart_karte_kreise(
     metrik: str = "median_entgelt",
     titel: str = "",
 ) -> go.Figure:
-    """Choropleth-Karte auf Kreisebene. df muss Spalte 'ags' (5-stellig) enthalten."""
+    """
+    Choropleth-Karte auf Kreisebene über plotly Mapbox (zuverlässiger als
+    das Standard-Geo-Subsystem). df muss Spalte 'ags' (5-stellig) enthalten.
+    """
     label = {
         "median_entgelt":    "Median €/Monat",
         "arbeitslosenquote": "AL-Quote (%)",
+        "alq":               "AL-Quote (%)",
     }.get(metrik, metrik)
     geo = _geojson_kreise()
 
@@ -352,9 +356,16 @@ def chart_karte_kreise(
         )
         return _layout(fig, titel or label)
 
-    fig = px.choropleth(
+    # Hover-Spalten dynamisch zusammenstellen (ALQ + Entgelt wenn vorhanden)
+    hover_cols = ["kreis"]
+    if "arbeitslosenquote" in df.columns:
+        hover_cols.append("arbeitslosenquote")
+    if "median_entgelt" in df.columns:
+        hover_cols.append("median_entgelt")
+
+    fig = px.choropleth_mapbox(
         df, geojson=geo,
-        locations="ags", featureidkey="properties.ags",
+        locations="ags", featureidkey="id",
         color=metrik,
         color_continuous_scale=[
             [0.0,  "#fff5eb"],
@@ -363,22 +374,32 @@ def chart_karte_kreise(
             [0.75, "#d94801"],
             [1.0,  "#7f2704"],
         ],
+        range_color=[df[metrik].min(), df[metrik].max()],
+        mapbox_style="white-bg",
+        zoom=4.5,
+        center={"lat": 51.1657, "lon": 10.4515},
         labels={metrik: label},
-        custom_data=["kreis", "bundesland", metrik],
+        custom_data=hover_cols,
+        opacity=0.85,
     )
+
+    # Hovertemplate dynamisch bauen
+    hover_parts = ["<b>%{customdata[0]}</b>"]
+    idx = 1
+    if "arbeitslosenquote" in hover_cols:
+        hover_parts.append(f"AL-Quote: %{{customdata[{idx}]:.1f}} %")
+        idx += 1
+    if "median_entgelt" in hover_cols:
+        hover_parts.append(f"Median-Entgelt: %{{customdata[{idx}]:,.0f}} €")
+        idx += 1
+
     fig.update_traces(
-        hovertemplate=(
-            "<b>%{customdata[0]}</b><br>"
-            "%{customdata[1]}<br>"
-            f"{label}: " + "%{customdata[2]:,.0f}<extra></extra>"
-        )
+        hovertemplate="<br>".join(hover_parts) + "<extra></extra>",
     )
-    fig.update_geos(fitbounds="locations", visible=False)
     fig.update_layout(
         **_BASE_LAYOUT_NO_MARGIN,
         margin=dict(l=0, r=0, t=50, b=0),
         title=dict(text=titel or label, font=dict(size=14), x=0),
-        geo=dict(bgcolor="rgba(0,0,0,0)"),
         coloraxis_colorbar=dict(title=label, len=0.6),
     )
     return fig

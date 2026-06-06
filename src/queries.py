@@ -512,18 +512,45 @@ def query_kreis_liste() -> pd.DataFrame:
 
 # ── MiLo-Evaluation: flexible Kreiskategorisierung + ALQ-Aggregation ────────
 
-def query_alq_kreise(start_jahr: int = 2007, end_jahr: int = 2025) -> pd.DataFrame:
-    """ALQ je Kreis und Jahr aus BA-Bulk-Excel."""
-    q = f"""
-        SELECT ags, kreis, jahr, alq
-        FROM   alq_kreise
-        WHERE  jahr BETWEEN {int(start_jahr)} AND {int(end_jahr)}
-        ORDER  BY ags, jahr
+def query_alq_kreise(
+    jahr: int | None = None,
+    start_jahr: int = 2007,
+    end_jahr: int = 2025,
+) -> pd.DataFrame:
+    """
+    ALQ je Kreis aus BA-Bulk-Excel.
+    - Ohne Argument: alle Jahre (für MiLo-Evaluation, query_milo_evaluation).
+    - jahr=YYYY: Snapshot eines Jahres + zusätzliche Spalten für Karten/Ranking
+      (bl_code, bundesland, arbeitslosenquote als Alias zu alq).
     """
     try:
+        if jahr is not None:
+            q = f"""
+                SELECT ags, kreis,
+                       LEFT(ags, 2) AS bl_code,
+                       alq           AS arbeitslosenquote,
+                       alq,
+                       jahr,
+                       ''            AS bundesland
+                FROM   alq_kreise
+                WHERE  jahr = {int(jahr)}
+                ORDER  BY ags
+            """
+        else:
+            q = f"""
+                SELECT ags, kreis, jahr, alq
+                FROM   alq_kreise
+                WHERE  jahr BETWEEN {int(start_jahr)} AND {int(end_jahr)}
+                ORDER  BY ags, jahr
+            """
         return _con().execute(q).df()
     except Exception:
         return pd.DataFrame()
+
+
+def query_alq_kreise_snapshot(jahr: int = 2024) -> pd.DataFrame:
+    """Alias für query_alq_kreise(jahr=…) — explizite Single-Year-API."""
+    return query_alq_kreise(jahr=jahr)
 
 
 def klassifiziere_kreise(
