@@ -689,6 +689,168 @@ def chart_rang_sparkline(df: pd.DataFrame, kreis_name: str = "") -> go.Figure:
     return fig
 
 
+# ─── 10b. Kreis-Story Multi-Vergleich ─────────────────────────────────────────
+
+_MULTI_KREIS_PALETTE = [
+    "#F07000",  # THWS Orange
+    "#1B4F72",  # Deep Blue
+    "#1E8449",  # Waldgrün
+    "#9467BD",  # Violett
+    "#B7770D",  # Amber
+]
+
+
+def chart_quintil_bahn_multi(dfs: dict, titel: str = "") -> go.Figure:
+    """
+    Quintil-Bahn für mehrere Kreise gleichzeitig — eine farbige Trajektorie
+    pro Kreis, mit kleinem Y-Offset je Kreis damit Linien sich nicht verdecken.
+    dfs: {kreis_label: df_story} mit Spalten jahr, quantil_gruppe.
+    """
+    if not dfs:
+        fig = go.Figure()
+        _layout(fig, titel or "Quintil-Bahn — keine Kreise gewählt")
+        return fig
+
+    pos_map = {q: i for i, q in enumerate(_QUINTIL_ORDER)}
+    fig = go.Figure()
+
+    # Hintergrund-Bahnen mit Quintil-Farben
+    for i, q in enumerate(_QUINTIL_ORDER):
+        fig.add_hrect(
+            y0=i - 0.45, y1=i + 0.45,
+            fillcolor=_QUINTIL_COLORS[q], opacity=0.08,
+            line_width=0, layer="below",
+        )
+
+    # Y-Offset damit überlappende Linien sichtbar bleiben
+    n = len(dfs)
+    offsets = (
+        [0.0] if n == 1
+        else [-0.18 + 0.36 * i / (n - 1) for i in range(n)]
+    )
+
+    for i, (label, df) in enumerate(dfs.items()):
+        d = df.dropna(subset=["quantil_gruppe"]).copy()
+        if d.empty:
+            continue
+        d["y_pos"] = d["quantil_gruppe"].map(pos_map) + offsets[i]
+        farbe = _MULTI_KREIS_PALETTE[i % len(_MULTI_KREIS_PALETTE)]
+
+        # Trajektorien-Linie (step)
+        fig.add_trace(go.Scatter(
+            x=d["jahr"], y=d["y_pos"],
+            mode="lines+markers",
+            line=dict(color=farbe, width=2.5, shape="hv"),
+            marker=dict(size=11, color=farbe,
+                        line=dict(color="white", width=1.5)),
+            name=label,
+            customdata=d["quantil_gruppe"],
+            hovertemplate=(
+                f"<b>{label}</b><br>%{{x}}<br>%{{customdata}}<extra></extra>"
+            ),
+        ))
+
+    _layout(fig, titel or "Quintil-Bahn — Vergleich")
+    fig.update_yaxes(
+        range=[-0.7, 4.7],
+        tickvals=list(range(5)),
+        ticktext=_QUINTIL_ORDER,
+        showgrid=False, zeroline=False,
+        tickfont=dict(size=11, color="#3A3A3C"),
+    )
+    fig.update_xaxes(
+        dtick=1, gridcolor=_GRID,
+        tickfont=dict(size=11, color="#6E6E73"),
+    )
+    fig.update_layout(margin=dict(l=120, r=25, t=50, b=40), height=420)
+    return fig
+
+
+def chart_kreis_im_kontext_multi(
+    dfs: dict,
+    df_quintile: pd.DataFrame,
+    titel: str = "",
+) -> go.Figure:
+    """
+    Lohnverlauf mehrerer Kreise (verschiedenfarbig) + 5 gepunktete Quintil-
+    Hintergrundlinien für den Kontext.
+    dfs: {kreis_label: df_story} mit Spalten jahr, median_entgelt.
+    """
+    fig = go.Figure()
+
+    # Hintergrund: 5 Quintil-Durchschnittslinien (gepunktet)
+    for gruppe in _QUINTIL_ORDER:
+        dq = df_quintile[df_quintile["quantil_gruppe"] == gruppe].sort_values("jahr")
+        if dq.empty:
+            continue
+        fig.add_trace(go.Scatter(
+            x=dq["jahr"], y=dq["avg_entgelt"],
+            name=gruppe, mode="lines",
+            line=dict(color=_QUINTIL_COLORS[gruppe], width=1.3, dash="dot"),
+            opacity=0.45,
+            hovertemplate=f"<b>{gruppe}</b><br>%{{x}}: %{{y:,.0f}} €<extra></extra>",
+            legendgroup="quintile",
+            legendgrouptitle_text="Quintil-Schnitt",
+        ))
+
+    # Vordergrund: ein Trace pro Kreis
+    for i, (label, df) in enumerate(dfs.items()):
+        farbe = _MULTI_KREIS_PALETTE[i % len(_MULTI_KREIS_PALETTE)]
+        fig.add_trace(go.Scatter(
+            x=df["jahr"], y=df["median_entgelt"],
+            name=label, mode="lines+markers",
+            line=dict(color=farbe, width=3.0),
+            marker=dict(size=9, color=farbe,
+                        line=dict(color="white", width=1.5)),
+            hovertemplate=(
+                f"<b>{label}</b><br>%{{x}}: %{{y:,.2f}} €/Monat<extra></extra>"
+            ),
+            legendgroup="kreise",
+            legendgrouptitle_text="Kreise",
+        ))
+
+    _layout(fig, titel or "Lohnverlauf im Quintil-Kontext — Vergleich",
+            "Median-Entgelt €/Monat")
+    fig.update_yaxes(tickformat=",.0f")
+    fig.update_xaxes(dtick=1)
+    return fig
+
+
+def chart_rang_sparkline_multi(dfs: dict, titel: str = "") -> go.Figure:
+    """
+    Rang-Verlauf mehrerer Kreise als verschiedenfarbige Linien.
+    Y-Achse invertiert (Platz 1 oben).
+    dfs: {kreis_label: df_story} mit Spalten jahr, rang, n_kreise.
+    """
+    if not dfs:
+        fig = go.Figure()
+        _layout(fig, titel or "Rang — keine Kreise gewählt")
+        return fig
+
+    n_kreise = max(int(df["n_kreise"].max()) for df in dfs.values() if not df.empty)
+    fig = go.Figure()
+    for i, (label, df) in enumerate(dfs.items()):
+        if df.empty:
+            continue
+        farbe = _MULTI_KREIS_PALETTE[i % len(_MULTI_KREIS_PALETTE)]
+        fig.add_trace(go.Scatter(
+            x=df["jahr"], y=df["rang"],
+            name=label, mode="lines+markers",
+            line=dict(color=farbe, width=2.6),
+            marker=dict(size=8, color=farbe,
+                        line=dict(color="white", width=1.5)),
+            hovertemplate=(
+                f"<b>{label}</b><br>Jahr: %{{x}}<br>"
+                "Platz %{y} von " + str(n_kreise) + "<extra></extra>"
+            ),
+        ))
+    _layout(fig, titel or f"Rang-Verlauf (von {n_kreise} Kreisen)",
+            "Platzierung (Platz 1 = höchster Lohn)")
+    fig.update_yaxes(autorange="reversed", tickformat="d")
+    fig.update_xaxes(dtick=1)
+    return fig
+
+
 # ─── 11. Mindestlohn vs. Tariflohnindex (Indexvergleich) ─────────────────────
 
 def chart_mindestlohn_vs_tariflohn(df: pd.DataFrame, basis_jahr: int = 2015) -> go.Figure:

@@ -41,6 +41,7 @@ from src.charts import (
     chart_karte,
     chart_karte_kreise,
     chart_kreis_im_kontext,
+    chart_kreis_im_kontext_multi,
     chart_kreise_topbottom_bar,
     chart_milo_balken_stichtage,
     chart_milo_tabelle,
@@ -48,8 +49,10 @@ from src.charts import (
     chart_mindestlohn,
     chart_mindestlohn_vs_tariflohn,
     chart_quintil_bahn,
+    chart_quintil_bahn_multi,
     chart_quintil_verlauf,
     chart_rang_sparkline,
+    chart_rang_sparkline_multi,
     format_ranking,
 )
 
@@ -436,7 +439,7 @@ if seite == "Überblick":
 - **Beschäftigung** — sozialversicherungspflichtig Beschäftigte und Erwerbstätige (VGR) nach Bundesland, mit gestapelten Ansichten.
 - **Mindestlohn** — Anpassungshistorie seit 2015, Indexvergleich mit dem allgemeinen Tariflohn (Destatis).
 - **Entgelt nach Kreisen** — Median-Bruttoentgelte für rund 405 Kreise, mit Quintil-Klassifizierung, Gruppen-Vergleich und Kartenvergleich zwischen zwei Zeitpunkten.
-- **Kreis-Story** — Lohnentwicklung eines einzelnen Kreises über die Zeit: in welchem Quintil war er, ist er auf- oder abgestiegen, welche Platzierung unter allen Kreisen.
+- **Kreis-Story** — Lohnentwicklung einzelner oder mehrerer Kreise über die Zeit: in welchem Quintil waren sie, sind sie auf- oder abgestiegen, welche Platzierung unter allen Kreisen. Bei mehreren Kreisen direkter Vergleich mit überlagerten Trajektorien.
 - **Download** — alle Datensätze als CSV oder Excel.
 - **Literatur** — kuratierte Auswahl wissenschaftlicher Studien und Policy-Berichte.
 
@@ -1637,10 +1640,10 @@ elif seite == "Entgelt nach Kreisen":
 elif seite == "Kreis-Story":
     hero(
         eyebrow="Kreis-Story",
-        title="Wie hat sich ein Kreis entwickelt?",
-        body="Wähle einen Kreis und sieh seine Lohnentwicklung über die Jahre — "
-             "in welchem Quintil er war, ob er aufgestiegen oder abgerutscht ist, "
-             "und wie er im Vergleich zu allen anderen Kreisen platziert ist.",
+        title="Wie haben sich die Kreise entwickelt?",
+        body="Wähle einen Kreis für die volle Story-Ansicht oder mehrere Kreise "
+             "für den direkten Vergleich — Quintil-Trajektorien, Lohnverlauf und "
+             "Rang-Entwicklung übereinandergelegt.",
     )
 
     entgelt_path_ks = ROOT / "data" / "processed" / "entgelt_kreise.parquet"
@@ -1667,17 +1670,30 @@ elif seite == "Kreis-Story":
         # Anzeige: "Kreis (Bundesland)" — sortiert nach Bundesland/Kreis
         liste_kreise = liste_kreise.copy()
         liste_kreise["label"] = liste_kreise["kreis"] + " (" + liste_kreise["bundesland"] + ")"
-        # Default: Würzburg, Stadt wenn verfügbar
-        wb_idx = liste_kreise[liste_kreise["kreis"] == "Würzburg, Stadt"].index
-        default_idx = int(wb_idx[0]) if len(wb_idx) > 0 else 0
-        sel_label = st.selectbox(
-            "Kreis auswählen",
+        # Default: Würzburg, Stadt + Schweinfurt zum Demo-Vergleich
+        defaults = [
+            l for l in liste_kreise["label"]
+            if l.startswith(("Würzburg, Stadt", "Schweinfurt, Stadt"))
+        ][:2] or [liste_kreise["label"].iloc[0]]
+        sel_labels = st.multiselect(
+            "Kreise auswählen (1–5)",
             liste_kreise["label"].tolist(),
-            index=default_idx,
-            help=f"{len(liste_kreise)} Kreise verfügbar",
+            default=defaults,
+            max_selections=5,
+            help=(
+                f"{len(liste_kreise)} Kreise verfügbar. Ein Kreis → klassische "
+                "Story-Ansicht mit Trend-Header und Kennzahlen. Mehrere Kreise "
+                "→ Vergleichsmodus mit überlagerten Trajektorien und Vergleichs-"
+                "tabelle."
+            ),
         )
-        sel_ags = liste_kreise[liste_kreise["label"] == sel_label].iloc[0]["ags"]
-        sel_kreis = liste_kreise[liste_kreise["label"] == sel_label].iloc[0]["kreis"]
+        if not sel_labels:
+            st.info("Bitte mindestens einen Kreis auswählen.")
+            st.stop()
+        sel_kreise_rows = [
+            liste_kreise[liste_kreise["label"] == lbl].iloc[0]
+            for lbl in sel_labels
+        ]
     with col_ks2:
         sel_merkmal_ks = st.selectbox(
             "Merkmal",
@@ -1709,104 +1725,186 @@ elif seite == "Kreis-Story":
             ),
         )
 
-    df_story = query_kreis_story(sel_ags, sel_merkmal_ks)
-    if df_story.empty:
-        st.warning("Keine Daten für diesen Kreis.")
+    # Daten für alle gewählten Kreise holen
+    stories = {}  # label -> df_story
+    for row in sel_kreise_rows:
+        df = query_kreis_story(row["ags"], sel_merkmal_ks)
+        if not df.empty:
+            stories[row["label"]] = df
+    if not stories:
+        st.warning("Keine Daten für die ausgewählten Kreise.")
         st.stop()
 
-    # ── Status-Header (Kennzahlen) ───────────────────────────────────────────
-    erstes = df_story.iloc[0]
-    letztes = df_story.iloc[-1]
-
-    # Trend-Logik
+    df_qv_ks = _quintil_verlauf(sel_merkmal_ks)
+    is_multi = len(stories) > 1
     pos_map = {"Ärmste 20%": 0, "Unteres Mittel": 1, "Mittleres Mittel": 2,
                "Oberes Mittel": 3, "Reichste 20%": 4}
-    q_start = pos_map.get(erstes["quantil_gruppe"], -1)
-    q_ende  = pos_map.get(letztes["quantil_gruppe"], -1)
-    if q_start == -1 or q_ende == -1:
-        trend_label, trend_color = "—", "#8E8E93"
-    elif q_ende > q_start:
-        trend_label, trend_color = f"↗ {q_ende - q_start} Stufe(n) aufgestiegen", "#1E8449"
-    elif q_ende < q_start:
-        trend_label, trend_color = f"↘ {q_start - q_ende} Stufe(n) abgerutscht", "#C0392B"
+
+    # ── Status-Header: bei 1 Kreis = Trend-Card, bei >1 = Vergleichstabelle ──
+    if not is_multi:
+        sel_label   = next(iter(stories.keys()))
+        df_story    = stories[sel_label]
+        sel_kreis   = sel_kreise_rows[0]["kreis"]
+        sel_ags     = sel_kreise_rows[0]["ags"]
+        erstes      = df_story.iloc[0]
+        letztes     = df_story.iloc[-1]
+        q_start     = pos_map.get(erstes["quantil_gruppe"], -1)
+        q_ende      = pos_map.get(letztes["quantil_gruppe"], -1)
+        if q_start == -1 or q_ende == -1:
+            trend_label, trend_color = "—", "#8E8E93"
+        elif q_ende > q_start:
+            trend_label, trend_color = f"↗ {q_ende - q_start} Stufe(n) aufgestiegen", "#1E8449"
+        elif q_ende < q_start:
+            trend_label, trend_color = f"↘ {q_start - q_ende} Stufe(n) abgerutscht", "#C0392B"
+        else:
+            trend_label, trend_color = "→ Stabil im selben Quintil", "#1B4F72"
+
+        lohn_diff = letztes["median_entgelt"] - erstes["median_entgelt"]
+        lohn_pct  = 100.0 * lohn_diff / erstes["median_entgelt"]
+        rang_diff = int(erstes["rang"] - letztes["rang"])
+
+        st.markdown(
+            f'<div class="info-card" style="border-left-color:{trend_color}">'
+            f'<span class="info-card-label" style="color:{trend_color}">{sel_kreis} · {letztes["bundesland"]}</span>'
+            f'<p style="font-size:1.05rem;font-weight:600;color:#1D1D1F">{trend_label} ({int(erstes["jahr"])} → {int(letztes["jahr"])})</p>'
+            f'</div>',
+            unsafe_allow_html=True,
+        )
+
+        m1, m2, m3, m4 = st.columns(4)
+        m1.metric(
+            f"Lohn {int(letztes['jahr'])}",
+            f"{letztes['median_entgelt']:,.0f} €".replace(",", "."),
+            delta=f"+{lohn_pct:.1f} % seit {int(erstes['jahr'])}",
+        )
+        m2.metric(
+            "Aktuelles Quintil",
+            letztes["quantil_gruppe"] if pd.notna(letztes["quantil_gruppe"]) else "—",
+        )
+        m3.metric(
+            f"Platz {int(letztes['jahr'])}",
+            f"{int(letztes['rang'])} / {int(letztes['n_kreise'])}",
+            delta=f"{rang_diff:+d} Ränge seit {int(erstes['jahr'])}",
+            delta_color="normal",
+            help=(
+                "Die Gesamtzahl der Kreise variiert leicht über die Jahre wegen "
+                "Verwaltungsreformen: 2016 wurde Osterode am Harz in den Landkreis "
+                "Göttingen eingegliedert (neuer AGS 03159), 2021 ging Eisenach im "
+                "Wartburgkreis auf. Daher 402 → 401 → 400 Kreise."
+            ),
+        )
+        m4.metric(
+            "Lohnzuwachs absolut",
+            f"+{lohn_diff:,.0f} €".replace(",", "."),
+        )
     else:
-        trend_label, trend_color = "→ Stabil im selben Quintil", "#1B4F72"
-
-    lohn_diff = letztes["median_entgelt"] - erstes["median_entgelt"]
-    lohn_pct  = 100.0 * lohn_diff / erstes["median_entgelt"]
-    rang_diff = int(erstes["rang"] - letztes["rang"])  # positiv = besser geworden
-
-    st.markdown(
-        f'<div class="info-card" style="border-left-color:{trend_color}">'
-        f'<span class="info-card-label" style="color:{trend_color}">{sel_kreis} · {letztes["bundesland"]}</span>'
-        f'<p style="font-size:1.05rem;font-weight:600;color:#1D1D1F">{trend_label} ({int(erstes["jahr"])} → {int(letztes["jahr"])})</p>'
-        f'</div>',
-        unsafe_allow_html=True,
-    )
-
-    m1, m2, m3, m4 = st.columns(4)
-    m1.metric(
-        f"Lohn {int(letztes['jahr'])}",
-        f"{letztes['median_entgelt']:,.0f} €".replace(",", "."),
-        delta=f"+{lohn_pct:.1f} % seit {int(erstes['jahr'])}",
-    )
-    m2.metric(
-        "Aktuelles Quintil",
-        letztes["quantil_gruppe"] if pd.notna(letztes["quantil_gruppe"]) else "—",
-    )
-    m3.metric(
-        f"Platz {int(letztes['jahr'])}",
-        f"{int(letztes['rang'])} / {int(letztes['n_kreise'])}",
-        delta=f"{rang_diff:+d} Ränge seit {int(erstes['jahr'])}",
-        delta_color="normal",
-        help=(
-            "Die Gesamtzahl der Kreise variiert leicht über die Jahre wegen "
-            "Verwaltungsreformen: 2016 wurde Osterode am Harz in den Landkreis "
-            "Göttingen eingegliedert (neuer AGS 03159), 2021 ging Eisenach im "
-            "Wartburgkreis auf. Daher 402 → 401 → 400 Kreise."
-        ),
-    )
-    m4.metric(
-        "Lohnzuwachs absolut",
-        f"+{lohn_diff:,.0f} €".replace(",", "."),
-    )
+        # Multi-Modus: Vergleichstabelle statt Trend-Card
+        st.subheader(f"Vergleichstabelle — {len(stories)} Kreise")
+        rows = []
+        for lbl, df in stories.items():
+            e, l = df.iloc[0], df.iloc[-1]
+            q_s = pos_map.get(e["quantil_gruppe"], -1)
+            q_e = pos_map.get(l["quantil_gruppe"], -1)
+            stufen = q_e - q_s if (q_s >= 0 and q_e >= 0) else None
+            if stufen is None:
+                trend = "—"
+            elif stufen > 0:
+                trend = f"↗ +{stufen}"
+            elif stufen < 0:
+                trend = f"↘ {stufen}"
+            else:
+                trend = "→ stabil"
+            rows.append({
+                "Kreis": lbl,
+                f"Lohn {int(e['jahr'])} €": int(e["median_entgelt"]),
+                f"Lohn {int(l['jahr'])} €": int(l["median_entgelt"]),
+                "Wachstum %": round(100 * (l["median_entgelt"] - e["median_entgelt"]) / e["median_entgelt"], 1),
+                "Quintil heute": l["quantil_gruppe"] if pd.notna(l["quantil_gruppe"]) else "—",
+                "Quintil-Trend": trend,
+                f"Rang {int(l['jahr'])}": f"{int(l['rang'])} / {int(l['n_kreise'])}",
+                "Δ Ränge": int(e["rang"] - l["rang"]),
+            })
+        st.dataframe(
+            pd.DataFrame(rows),
+            use_container_width=True, hide_index=True,
+        )
+        st.caption(
+            "Wachstum positiv = höheres Lohnniveau am Ende. "
+            "Δ Ränge positiv = Kreis hat Plätze gewonnen (niedrigerer Rang = besserer Platz)."
+        )
 
     st.divider()
 
     # ── Quintil-Bahn ─────────────────────────────────────────────────────────
     st.subheader("Quintil-Bahn")
-    st.caption(
-        "Jeder Punkt markiert das Quintil, in dem der Kreis im jeweiligen Jahr "
-        "lag. Sprünge zwischen den Bahnen zeigen Aufstieg oder Abrutschen."
-    )
-    st.plotly_chart(chart_quintil_bahn(df_story, sel_kreis), use_container_width=True)
+    if is_multi:
+        st.caption(
+            "Jeder Kreis hat eine eigene Trajektorie. Sprünge zwischen den "
+            "horizontalen Bahnen zeigen Aufstieg oder Abrutschen. Linien werden "
+            "leicht vertikal versetzt, damit überlappende Verläufe sichtbar bleiben."
+        )
+        st.plotly_chart(chart_quintil_bahn_multi(stories), use_container_width=True)
+    else:
+        st.caption(
+            "Jeder Punkt markiert das Quintil, in dem der Kreis im jeweiligen Jahr "
+            "lag. Sprünge zwischen den Bahnen zeigen Aufstieg oder Abrutschen."
+        )
+        st.plotly_chart(chart_quintil_bahn(df_story, sel_kreis), use_container_width=True)
 
     st.divider()
 
     # ── Lohnverlauf im Kontext ───────────────────────────────────────────────
     st.subheader("Lohnverlauf im Quintil-Kontext")
-    st.caption(
-        "Orange = dieser Kreis. Die fünf gepunkteten Hintergrundlinien zeigen "
-        "den Durchschnittslohn jedes Quintils zum Vergleich."
-    )
-    df_qv_ks = _quintil_verlauf(sel_merkmal_ks)
-    st.plotly_chart(
-        chart_kreis_im_kontext(df_story, df_qv_ks, sel_kreis),
-        use_container_width=True,
-    )
+    if is_multi:
+        st.caption(
+            "Jeder Kreis als eigene farbige Linie. Die fünf gepunkteten "
+            "Hintergrundlinien zeigen den Durchschnittslohn jedes Quintils."
+        )
+        st.plotly_chart(
+            chart_kreis_im_kontext_multi(stories, df_qv_ks),
+            use_container_width=True,
+        )
+    else:
+        st.caption(
+            "Orange = dieser Kreis. Die fünf gepunkteten Hintergrundlinien zeigen "
+            "den Durchschnittslohn jedes Quintils zum Vergleich."
+        )
+        st.plotly_chart(
+            chart_kreis_im_kontext(df_story, df_qv_ks, sel_kreis),
+            use_container_width=True,
+        )
 
     st.divider()
 
     # ── Rang-Sparkline ───────────────────────────────────────────────────────
     st.subheader("Platzierung über die Jahre")
-    st.caption(
-        f"Position des Kreises unter allen ~{int(letztes['n_kreise'])} Kreisen "
-        "bei diesem Merkmal. Platz 1 = höchster Lohn deutschlandweit."
-    )
-    st.plotly_chart(chart_rang_sparkline(df_story, sel_kreis), use_container_width=True)
+    if is_multi:
+        st.caption(
+            "Position der Kreise unter allen deutschen Kreisen. "
+            "Platz 1 = höchster Lohn deutschlandweit. Niedrigere Linie = besserer Platz."
+        )
+        st.plotly_chart(chart_rang_sparkline_multi(stories), use_container_width=True)
+    else:
+        st.caption(
+            f"Position des Kreises unter allen ~{int(letztes['n_kreise'])} Kreisen "
+            "bei diesem Merkmal. Platz 1 = höchster Lohn deutschlandweit."
+        )
+        st.plotly_chart(chart_rang_sparkline(df_story, sel_kreis), use_container_width=True)
 
     st.divider()
-    dl_buttons(df_story, f"kreisstory_{sel_ags}_{sel_merkmal_ks}", "Kreis-Story exportieren")
+    # Download: alle ausgewählten Kreise konkateniert
+    if is_multi:
+        df_export = pd.concat(
+            [df.assign(kreis_label=lbl) for lbl, df in stories.items()],
+            ignore_index=True,
+        )
+        dl_buttons(
+            df_export,
+            f"kreisstory_vergleich_{len(stories)}kreise_{sel_merkmal_ks}",
+            f"Vergleich ({len(stories)} Kreise) exportieren",
+        )
+    else:
+        dl_buttons(df_story, f"kreisstory_{sel_ags}_{sel_merkmal_ks}", "Kreis-Story exportieren")
 
     st.markdown(
         '<p class="source-note">Bundesagentur für Arbeit — Entgeltstatistik '
