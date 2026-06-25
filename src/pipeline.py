@@ -436,6 +436,77 @@ def fetch_ba_alq_kreise() -> pd.DataFrame:
     return df
 
 
+# ── Arbeitslose absolut je Kreis (Zähler der ALQ) ────────────────────────────
+ARBEITSLOSE_KREISE_URL = (
+    "https://statistik.arbeitsagentur.de/Statistikdaten/Detail/Aktuell/"
+    "iiia4/arbeitslose-kgd-ab1998/arbeitslose-kgd-ab1998-d-0-xlsx.xlsx"
+)
+
+
+def fetch_ba_arbeitslose_kreise() -> pd.DataFrame:
+    """
+    Bestand an Arbeitslosen (Jahresdurchschnitt) je Kreis und Jahr (1998–heute).
+    Quelle: BA-Statistik Bulk-Excel, aktueller Gebietsstand. Dies ist der
+    Zähler der Arbeitslosenquote — zusammen mit alq_kreise lässt sich die
+    Bezugsgröße (zivile Erwerbspersonen) ableiten.
+    """
+    log.info("BA-Statistik: Arbeitslose-Kreise-Excel holen …")
+    r = requests.get(ARBEITSLOSE_KREISE_URL, headers=BA_HEADERS, timeout=60)
+    r.raise_for_status()
+    raw = pd.read_excel(io.BytesIO(r.content), sheet_name="Auswertung", header=None)
+    log.info(f"  Excel geladen: {raw.shape}")
+
+    # Zeile 10 enthält zuerst Jahres-Header, danach Monats-Datetimes.
+    # Nur die echten Jahresspalten (Plausibilitätsprüfung 1990–2035) nehmen.
+    jahr_row = raw.iloc[10, 1:].tolist()
+    jahr_cols = []  # (spalten_index_relativ, jahr)
+    for i, val in enumerate(jahr_row):
+        if pd.isna(val):
+            continue
+        try:
+            j = int(float(val))
+        except (ValueError, TypeError):
+            continue  # datetime o.ä. → Monatsspalte, überspringen
+        if 1990 <= j <= 2035:
+            jahr_cols.append((i, j))
+    if not jahr_cols:
+        raise ValueError("Keine Jahresspalten erkannt.")
+    log.info(f"  Jahre erkannt: {jahr_cols[0][1]}–{jahr_cols[-1][1]} ({len(jahr_cols)} Jahre)")
+
+    records = []
+    for idx in range(12, len(raw)):
+        region = raw.iat[idx, 0]
+        if pd.isna(region):
+            continue
+        s = str(region).strip()
+        if not s or not s[:1].isdigit():
+            continue
+        parts = s.split(" ", 1)
+        if len(parts) < 2 or len(parts[0]) != 5:
+            continue
+        ags, kreis = parts[0], parts[1]
+        for col_i, jahr in jahr_cols:
+            val = raw.iat[idx, 1 + col_i]
+            if pd.isna(val):
+                continue
+            if isinstance(val, (int, float)):
+                arbeitslose = float(val)   # Zelle bereits numerisch
+            else:
+                # String mit deutschem Tausenderpunkt: "5.789" → 5789
+                try:
+                    arbeitslose = float(str(val).replace(".", "").replace(",", "."))
+                except (ValueError, TypeError):
+                    continue
+            records.append({"ags": ags, "kreis": kreis, "jahr": jahr,
+                            "arbeitslose": arbeitslose})
+
+    df = pd.DataFrame(records)
+    df["quelle"]       = "BA-Statistik (arbeitslose-kgd-ab1998-d)"
+    df["abgerufen_am"] = date.today().isoformat()
+    log.info(f"  ✓ {len(df):,} Zeilen, {df['ags'].nunique()} Kreise")
+    return df
+
+
 # ═══════════════════════════════════════════════════════════
 # 2b. TARIFLOHNINDEX (Destatis Lange Reihe)
 # Quelle: destatis.de → Tarifverdienste-Tarifbindung
@@ -771,6 +842,11 @@ def run_full_update():
         save_parquet(fetch_ba_alq_kreise(), "alq_kreise")
     except Exception as e:
         log.warning(f"⚠ alq_kreise: {e}")
+
+    try:
+        save_parquet(fetch_ba_arbeitslose_kreise(), "arbeitslose_kreise")
+    except Exception as e:
+        log.warning(f"⚠ arbeitslose_kreise: {e}")
 
     try:
         save_parquet(fetch_entgelt_kreise(), "entgelt_kreise")

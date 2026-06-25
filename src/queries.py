@@ -553,6 +553,20 @@ def query_alq_kreise_snapshot(jahr: int = 2024) -> pd.DataFrame:
     return query_alq_kreise(jahr=jahr)
 
 
+def query_arbeitslose_kreise(start_jahr: int = 1998, end_jahr: int = 2025) -> pd.DataFrame:
+    """Bestand an Arbeitslosen (Jahresdurchschnitt) je Kreis und Jahr."""
+    q = f"""
+        SELECT ags, kreis, jahr, arbeitslose
+        FROM   arbeitslose_kreise
+        WHERE  jahr BETWEEN {int(start_jahr)} AND {int(end_jahr)}
+        ORDER  BY ags, jahr
+    """
+    try:
+        return _con().execute(q).df()
+    except Exception:
+        return pd.DataFrame()
+
+
 def klassifiziere_kreise(
     df_entgelt_stichjahr: pd.DataFrame,
     modus: str = "quintil",
@@ -609,25 +623,42 @@ def klassifiziere_kreise(
     return df
 
 
+# Verfügbare Indikatoren für die MiLo-Evaluation
+MILO_INDIKATOREN = {
+    "alq":            "Arbeitslosenquote (%)",
+    "arbeitslose":    "Arbeitslose (Bestand)",
+    "erwerbspersonen": "Zivile Erwerbspersonen",
+    "entgelt":        "Median-Entgelt (€/Monat)",
+}
+
+
 def query_milo_evaluation(
     modus: str = "quintil",
     stichjahr: int = 2014,
     abs_unter: float | None = None,
     abs_ober:  float | None = None,
     merkmal:   str = "insgesamt",
+    indikator: str = "alq",
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
     """
-    Komplette MiLo-Evaluation: klassifiziert Kreise im Stichjahr nach Entgelt,
-    aggregiert ALQ pro Gruppe und Jahr.
-    Returns:
-      (df_aggregat,  df_klassifizierung)
-      df_aggregat: jahr, gruppe, mean_alq, median_alq, n_kreise
+    Klassifiziert Kreise im Stichjahr nach Entgelt und aggregiert einen
+    wählbaren Indikator pro Gruppe und Jahr.
+
+    indikator:
+      'alq'            → Gruppen-ALQ = Σ Arbeitslose / Σ Erwerbspersonen × 100
+                          (korrekt gewichtet, konsistent mit den Komponenten)
+      'arbeitslose'    → Σ Arbeitslose der Gruppe (Zähler der ALQ)
+      'erwerbspersonen'→ Σ zivile Erwerbspersonen (Nenner, abgeleitet aus
+                          Arbeitslose × 100 / ALQ je Kreis)
+      'entgelt'        → Ø Median-Entgelt der Gruppe
+
+    Returns (df_aggregat, df_klassifizierung):
+      df_aggregat: jahr, gruppe, wert, n_kreise
       df_klassifizierung: ags, kreis, median_entgelt, gruppe
     """
-    # 1. Entgelt-Stichjahr-Snapshot holen — Fallback auf nächstes verfügbares Jahr
+    # 1. Entgelt-Stichjahr-Snapshot — Fallback auf nächstes verfügbares Jahr
     df_e = query_entgelt_snapshot(stichjahr, merkmal)
     if df_e.empty:
-        # Suche das früheste verfügbare Jahr >= stichjahr, sonst frühestes überhaupt
         verfuegbar = _con().execute(
             "SELECT DISTINCT jahr FROM entgelt_kreise ORDER BY jahr"
         ).df()["jahr"].tolist()
@@ -638,21 +669,49 @@ def query_milo_evaluation(
         if df_e.empty:
             return pd.DataFrame(), pd.DataFrame()
     df_class = klassifiziere_kreise(df_e, modus, abs_unter, abs_ober)
+    klass_cols = df_class[["ags", "gruppe"]]
 
-    # 2. ALQ-Daten zur Klassifizierung joinen
-    df_alq = query_alq_kreise()
-    if df_alq.empty:
-        return pd.DataFrame(), df_class
+    # 2. Indikator-spezifische Zeitreihe je Kreis holen + auf Gruppe aggregieren
+    if indikator == "entgelt":
+        df_val = query_entgelt_kreise(merkmal)          # ags, jahr, median_entgelt
+        if df_val.empty:
+            return pd.DataFrame(), df_class
+        merged = df_val.merge(klass_cols, on="ags", how="inner")
+        agg = (
+            merged.groupby(["jahr", "gruppe"], observed=True)["median_entgelt"]
+                  .agg(wert="mean", n_kreise="count").reset_index()
+        )
+    else:
+        # ALQ + Arbeitslose je Kreis zusammenführen, Erwerbspersonen ableiten
+        df_alq = query_alq_kreise()                     # ags, jahr, alq
+        df_al  = query_arbeitslose_kreise()             # ags, jahr, arbeitslose
+        if df_alq.empty or df_al.empty:
+            return pd.DataFrame(), df_class
+        komp = df_alq.merge(df_al[["ags", "jahr", "arbeitslose"]],
+                            on=["ags", "jahr"], how="inner")
+        # Erwerbspersonen = Arbeitslose × 100 / ALQ (ALQ>0)
+        komp = komp[komp["alq"] > 0].copy()
+        komp["erwerbspersonen"] = komp["arbeitslose"] * 100.0 / komp["alq"]
+        merged = komp.merge(klass_cols, on="ags", how="inner")
 
-    merged = df_alq.merge(df_class[["ags", "gruppe"]], on="ags", how="inner")
+        grp = merged.groupby(["jahr", "gruppe"], observed=True)
+        summe = grp.agg(
+            arbeitslose=("arbeitslose", "sum"),
+            erwerbspersonen=("erwerbspersonen", "sum"),
+            n_kreise=("ags", "count"),
+        ).reset_index()
+        if indikator == "arbeitslose":
+            summe["wert"] = summe["arbeitslose"]
+        elif indikator == "erwerbspersonen":
+            summe["wert"] = summe["erwerbspersonen"]
+        else:  # 'alq' — korrekt gewichtet
+            summe["wert"] = (summe["arbeitslose"] * 100.0
+                             / summe["erwerbspersonen"])
+        agg = summe[["jahr", "gruppe", "wert", "n_kreise"]]
 
-    # 3. Pro Gruppe und Jahr aggregieren
-    agg = (
-        merged.groupby(["jahr", "gruppe"], observed=True)["alq"]
-              .agg(mean_alq="mean", median_alq="median", n_kreise="count")
-              .round(2).reset_index()
-    )
-    return agg, df_class
+    agg = agg.copy()
+    agg["wert"] = agg["wert"].round(2)
+    return agg.reset_index(drop=True), df_class
 
 
 def query_entgelt_snapshot(jahr: int, merkmal: str = "insgesamt") -> pd.DataFrame:

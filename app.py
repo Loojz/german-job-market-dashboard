@@ -25,6 +25,7 @@ from src.queries import (
     query_kreis_liste,
     query_kreis_story,
     query_milo_evaluation,
+    MILO_INDIKATOREN,
     query_mindestlohn,
     query_mindestlohn_vs_tariflohn,
     query_quintil_verlauf,
@@ -977,6 +978,25 @@ elif seite == "MiLo-Evaluation":
 > Datenquellen: BA-Statistik (ALQ je Kreis 1998+) und BA-Entgeltstatistik (Median-Entgelt 2015+).
         """)
 
+    # ── Indikator-Auswahl (steuert die gesamte Auswertung) ───────────────────
+    indikator = st.radio(
+        "Indikator",
+        list(MILO_INDIKATOREN.keys()),
+        format_func=lambda k: MILO_INDIKATOREN[k],
+        horizontal=True,
+        help=(
+            "Die Arbeitslosenquote lässt sich in ihre zwei Bestandteile zerlegen: "
+            "**Arbeitslose** (Zähler) und **zivile Erwerbspersonen** (Nenner). "
+            "So sieht man, ob eine sinkende Quote von weniger Arbeitslosen oder von "
+            "wachsender Erwerbsbevölkerung getragen wird. 'Median-Entgelt' zeigt die "
+            "Lohnentwicklung der Gruppen. Gruppen-ALQ = Σ Arbeitslose / Σ Erwerbspersonen "
+            "(korrekt gewichtet, konsistent mit den Komponenten)."
+        ),
+        key="milo_indikator",
+    )
+    indikator_label = MILO_INDIKATOREN[indikator]
+    ist_prozent = (indikator == "alq")
+
     # ── Klassifizierungs-Filter ──────────────────────────────────────────────
     col_m1, col_m2, col_m3 = st.columns([1.3, 1, 1])
     with col_m1:
@@ -1058,10 +1078,12 @@ elif seite == "MiLo-Evaluation":
 
     # ── Berechnung ───────────────────────────────────────────────────────────
     @st.cache_data(ttl=3600, show_spinner="MiLo-Evaluation berechnen …")
-    def _milo_run(modus_code, stichjahr, abs_unter, abs_ober, merkmal_milo):
-        return query_milo_evaluation(modus_code, stichjahr, abs_unter, abs_ober, merkmal_milo)
+    def _milo_run(modus_code, stichjahr, abs_unter, abs_ober, merkmal_milo, indikator):
+        return query_milo_evaluation(modus_code, stichjahr, abs_unter, abs_ober,
+                                     merkmal_milo, indikator)
 
-    agg_milo, klass_milo = _milo_run(modus_code, stichjahr, abs_unter, abs_ober, merkmal_milo)
+    agg_milo, klass_milo = _milo_run(modus_code, stichjahr, abs_unter, abs_ober,
+                                     merkmal_milo, indikator)
 
     if agg_milo.empty:
         st.warning("Keine Daten für diese Konfiguration. Andere Klassifizierung wählen.")
@@ -1088,14 +1110,27 @@ elif seite == "MiLo-Evaluation":
     st.divider()
 
     # ── Zeitreihe ────────────────────────────────────────────────────────────
-    st.subheader("Zeitreihe — Arbeitslosenquote nach Gruppe")
-    st.caption(
-        "Ø ALQ aller Kreise einer Gruppe. Vertikale Linien markieren "
-        "Mindestlohn-Anpassungen. Schließt sich die Lücke?"
-    )
+    st.subheader(f"Zeitreihe — {indikator_label} nach Gruppe")
+    if indikator == "alq":
+        st.caption(
+            "Gruppen-ALQ = Σ Arbeitslose / Σ Erwerbspersonen (korrekt gewichtet). "
+            "Vertikale Linien markieren Mindestlohn-Anpassungen. Schließt sich die Lücke?"
+        )
+    elif indikator == "arbeitslose":
+        st.caption(
+            "Summe der Arbeitslosen (Zähler der ALQ) je Gruppe. Sinkt der Bestand "
+            "in den Niedriglohn-Gruppen stärker?"
+        )
+    elif indikator == "erwerbspersonen":
+        st.caption(
+            "Summe der zivilen Erwerbspersonen (Nenner der ALQ) je Gruppe — "
+            "abgeleitet aus Arbeitslose × 100 / ALQ. Wächst die Erwerbsbevölkerung?"
+        )
+    else:
+        st.caption("Ø Median-Entgelt je Gruppe. Lohnentwicklung über die Zeit.")
     ml_for_chart = _mindestlohn()
     st.plotly_chart(
-        chart_milo_zeitreihe(agg_milo, "Arbeitslosenquote (%)", ml_for_chart),
+        chart_milo_zeitreihe(agg_milo, indikator_label, ml_for_chart, ist_prozent),
         use_container_width=True,
     )
 
@@ -1117,7 +1152,8 @@ elif seite == "MiLo-Evaluation":
     )
     if sel_stichjahre:
         st.plotly_chart(
-            chart_milo_balken_stichtage(agg_milo, sorted(sel_stichjahre), "Arbeitslosenquote (%)"),
+            chart_milo_balken_stichtage(agg_milo, sorted(sel_stichjahre),
+                                        indikator_label, ist_prozent),
             use_container_width=True,
         )
 
@@ -1125,13 +1161,16 @@ elif seite == "MiLo-Evaluation":
 
     # ── Tabellarischer Überblick ─────────────────────────────────────────────
     st.subheader("Tabellarischer Überblick")
-    st.caption("Ø ALQ pro Gruppe und Stichjahr + absolute Veränderung in Prozentpunkten.")
+    st.caption(
+        f"{indikator_label} pro Gruppe und Stichjahr + Veränderung zwischen "
+        "erstem und letztem Stichjahr."
+    )
     if sel_stichjahre:
-        tab = chart_milo_tabelle(agg_milo, sorted(sel_stichjahre))
+        tab = chart_milo_tabelle(agg_milo, sorted(sel_stichjahre), ist_prozent)
         st.dataframe(tab, use_container_width=True, hide_index=True)
 
-        # Story-Caption
-        if len(sel_stichjahre) >= 2 and "Δ " in tab.columns[-1]:
+        # Story-Caption nur für ALQ (pp-Logik)
+        if ist_prozent and len(sel_stichjahre) >= 2 and "Δ " in str(tab.columns[-1]):
             delta_col = tab.columns[-1]
             min_g = tab.loc[tab[delta_col].idxmin()]
             max_g = tab.loc[tab[delta_col].idxmax()]
@@ -1151,16 +1190,16 @@ elif seite == "MiLo-Evaluation":
     st.divider()
 
     # ── Downloads ────────────────────────────────────────────────────────────
-    dl_buttons(agg_milo, f"milo_eval_aggregat_{modus_code}_{stichjahr}", "Aggregat exportieren")
+    dl_buttons(agg_milo, f"milo_eval_{indikator}_{modus_code}_{stichjahr}", "Aggregat exportieren")
     dl_buttons(klass_milo[["ags", "kreis", "bundesland", "median_entgelt", "gruppe"]],
                f"milo_eval_klassifizierung_{modus_code}_{stichjahr}",
                "Klassifizierung exportieren")
 
     st.markdown(
-        '<p class="source-note">ALQ: Bundesagentur für Arbeit — '
-        '"Arbeitslosenquote bezogen auf alle zivilen Erwerbspersonen" (Jahresdurchschnitt). '
-        'Entgelt-Klassifizierung: BA-Entgeltstatistik (Vollzeitbeschäftigte Kerngruppe). '
-        'Beide Datenlizenz Deutschland 2.0.</p>',
+        '<p class="source-note">Arbeitslose &amp; ALQ: Bundesagentur für Arbeit '
+        '(Jahresdurchschnitt, Gebietsstand aktuell). Zivile Erwerbspersonen abgeleitet '
+        'aus Arbeitslose × 100 / ALQ. Entgelt-Klassifizierung: BA-Entgeltstatistik '
+        '(Vollzeitbeschäftigte Kerngruppe). Datenlizenz Deutschland 2.0.</p>',
         unsafe_allow_html=True,
     )
 

@@ -1006,31 +1006,33 @@ def chart_milo_zeitreihe(
     df_agg: pd.DataFrame,
     indikator_label: str = "Arbeitslosenquote (%)",
     ml_df: pd.DataFrame | None = None,
+    ist_prozent: bool = True,
 ) -> go.Figure:
     """
-    Zeitreihe pro Gruppe (mean_alq) mit optionalen Mindestlohn-Markierungen.
-    df_agg muss Spalten 'jahr','gruppe','mean_alq' haben.
+    Zeitreihe des gewählten Indikators pro Gruppe (Spalte 'wert')
+    mit optionalen Mindestlohn-Markierungen.
+    ist_prozent: True → %-Format (.2f); False → absolute Zahlen (,.0f).
     """
     fig = go.Figure()
     gruppen = list(df_agg["gruppe"].drop_duplicates())
     farben  = _gruppen_farben(gruppen)
+    yfmt = ".2f" if ist_prozent else ",.0f"
 
     for g in gruppen:
         d = df_agg[df_agg["gruppe"] == g].sort_values("jahr")
         fig.add_trace(go.Scatter(
-            x=d["jahr"], y=d["mean_alq"],
+            x=d["jahr"], y=d["wert"],
             name=g, mode="lines+markers",
             line=dict(color=farben[g], width=2.5),
             marker=dict(size=7),
             customdata=d[["n_kreise"]],
             hovertemplate=(
                 f"<b>{g}</b><br>Jahr: %{{x}}<br>"
-                f"Ø {indikator_label}: %{{y:.2f}}<br>"
+                f"{indikator_label}: %{{y:{yfmt}}}<br>"
                 "n Kreise: %{customdata[0]}<extra></extra>"
             ),
         ))
 
-    # Mindestlohn-Markierungen
     if ml_df is not None and not ml_df.empty:
         for _, row in ml_df.iterrows():
             jahr = pd.to_datetime(row["datum"]).year
@@ -1043,7 +1045,8 @@ def chart_milo_zeitreihe(
                     annotation_font=dict(size=9, color="rgba(240,112,0,0.95)"),
                 )
 
-    _layout(fig, f"{indikator_label} nach Gruppe", f"Ø {indikator_label}")
+    _layout(fig, f"{indikator_label} nach Gruppe", indikator_label)
+    fig.update_yaxes(tickformat=yfmt)
     fig.update_xaxes(dtick=1)
     return fig
 
@@ -1052,11 +1055,9 @@ def chart_milo_balken_stichtage(
     df_agg: pd.DataFrame,
     stichjahre: list[int],
     indikator_label: str = "Arbeitslosenquote (%)",
+    ist_prozent: bool = True,
 ) -> go.Figure:
-    """
-    Gruppierte Säulen zu definierten Stichjahren (z.B. 2014/2015/2020/2025).
-    df_agg muss Spalten 'jahr','gruppe','mean_alq' haben.
-    """
+    """Gruppierte Säulen zu definierten Stichjahren. Wert in Spalte 'wert'."""
     d = df_agg[df_agg["jahr"].isin(stichjahre)].copy()
     if d.empty:
         fig = go.Figure()
@@ -1065,38 +1066,53 @@ def chart_milo_balken_stichtage(
 
     gruppen = list(d["gruppe"].drop_duplicates())
     farben  = _gruppen_farben(gruppen)
+    yfmt = ".1f" if ist_prozent else ",.0f"
 
     fig = go.Figure()
     for g in gruppen:
         sub = d[d["gruppe"] == g].sort_values("jahr")
+        if ist_prozent:
+            txt = sub["wert"].round(1).astype(str)
+        else:
+            txt = sub["wert"].apply(lambda v: f"{v:,.0f}".replace(",", "."))
         fig.add_trace(go.Bar(
-            x=sub["jahr"].astype(str), y=sub["mean_alq"],
+            x=sub["jahr"].astype(str), y=sub["wert"],
             name=g, marker_color=farben[g],
-            text=sub["mean_alq"].round(1).astype(str),
-            textposition="outside", textfont=dict(size=10),
-            hovertemplate=f"<b>{g}</b><br>%{{x}}<br>%{{y:.2f}}<extra></extra>",
+            text=txt, textposition="outside", textfont=dict(size=10),
+            hovertemplate=f"<b>{g}</b><br>%{{x}}<br>%{{y:{yfmt}}}<extra></extra>",
         ))
 
     _layout(fig, f"{indikator_label} zu Stichjahren", indikator_label)
+    fig.update_yaxes(tickformat=yfmt)
     fig.update_layout(barmode="group", bargap=0.15, bargroupgap=0.05)
     return fig
 
 
-def chart_milo_tabelle(df_agg: pd.DataFrame, stichjahre: list[int]) -> pd.DataFrame:
+def chart_milo_tabelle(
+    df_agg: pd.DataFrame,
+    stichjahre: list[int],
+    ist_prozent: bool = True,
+) -> pd.DataFrame:
     """
-    Tabellarischer Überblick: pro Gruppe die ALQ-Werte zu allen Stichjahren
-    plus absolute Veränderung in Prozentpunkten zwischen erstem und letztem.
+    Tabellarischer Überblick: pro Gruppe der Indikator-Wert zu allen Stichjahren
+    plus Veränderung zwischen erstem und letztem Stichjahr.
+    Bei %-Indikatoren: Δ in Prozentpunkten. Sonst: Δ absolut + relativ in %.
     """
     d = df_agg[df_agg["jahr"].isin(stichjahre)].copy()
     if d.empty:
         return pd.DataFrame()
-    pivot = d.pivot(index="gruppe", columns="jahr", values="mean_alq")
+    pivot = d.pivot(index="gruppe", columns="jahr", values="wert")
     pivot = pivot.reindex(columns=sorted([j for j in stichjahre if j in pivot.columns]))
     if len(pivot.columns) >= 2:
         first, last = pivot.columns[0], pivot.columns[-1]
-        pivot[f"Δ {first}→{last} (pp)"] = (pivot[last] - pivot[first]).round(2)
-    # Hübsche Zahlen-Formatierung
-    return pivot.round(2).reset_index()
+        if ist_prozent:
+            pivot[f"Δ {first}→{last} (pp)"] = (pivot[last] - pivot[first]).round(2)
+        else:
+            pivot[f"Δ {first}→{last}"] = (pivot[last] - pivot[first]).round(0)
+            pivot[f"Δ {first}→{last} (%)"] = (
+                100.0 * (pivot[last] - pivot[first]) / pivot[first]
+            ).round(1)
+    return pivot.round(2 if ist_prozent else 0).reset_index()
 
 
 # Backward-compat Alias
