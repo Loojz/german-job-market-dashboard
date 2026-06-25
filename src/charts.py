@@ -331,6 +331,38 @@ def _geojson_kreise():
     return _GEOJSON_KREISE_CACHE
 
 
+# Das GeoJSON nutzt noch den alten Gebietsstand (Göttingen/Osterode bzw.
+# Eisenach getrennt), unsere Daten den aktuellen. Damit die Karte keine
+# weißen Löcher zeigt, wird der harmonisierte Wert zusätzlich auf die alten
+# Fragment-Polygone gelegt (Vorgänger-AGS bekommen denselben Wert).
+_GEOJSON_FRAGMENTE = {
+    "03159": ["03152", "03156"],  # Göttingen ← Göttingen-alt + Osterode
+    "16063": ["16056"],            # Wartburgkreis ← Eisenach
+}
+
+
+def _fuelle_geojson_fragmente(df: pd.DataFrame) -> pd.DataFrame:
+    """Dupliziert harmonisierte Kreis-Zeilen auf ihre alten Fragment-AGS,
+       damit alle GeoJSON-Polygone (alter Gebietsstand) eingefärbt werden."""
+    if "ags" not in df.columns:
+        return df
+    zusatz = []
+    vorhandene = set(df["ags"])
+    for neu, alte in _GEOJSON_FRAGMENTE.items():
+        if neu not in vorhandene:
+            continue
+        basis = df[df["ags"] == neu]
+        for alt in alte:
+            if alt in vorhandene:
+                continue
+            kopie = basis.copy()
+            kopie["ags"] = alt
+            zusatz.append(kopie)
+    if zusatz:
+        return pd.concat([df, *zusatz], ignore_index=True)
+    return df
+
+
 def chart_karte_kreise(
     df: pd.DataFrame,
     metrik: str = "median_entgelt",
@@ -346,6 +378,8 @@ def chart_karte_kreise(
         "alq":               "AL-Quote (%)",
     }.get(metrik, metrik)
     geo = _geojson_kreise()
+
+    df = _fuelle_geojson_fragmente(df)
 
     if not geo or df.empty:
         fig = px.bar(
