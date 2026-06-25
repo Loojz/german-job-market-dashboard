@@ -1838,24 +1838,6 @@ elif seite == "Kreis-Story":
 
     st.divider()
 
-    # ── Quintil-Bahn ─────────────────────────────────────────────────────────
-    st.subheader("Quintil-Bahn")
-    if is_multi:
-        st.caption(
-            "Jeder Kreis hat eine eigene Trajektorie. Sprünge zwischen den "
-            "horizontalen Bahnen zeigen Aufstieg oder Abrutschen. Linien werden "
-            "leicht vertikal versetzt, damit überlappende Verläufe sichtbar bleiben."
-        )
-        st.plotly_chart(chart_quintil_bahn_multi(stories), use_container_width=True)
-    else:
-        st.caption(
-            "Jeder Punkt markiert das Quintil, in dem der Kreis im jeweiligen Jahr "
-            "lag. Sprünge zwischen den Bahnen zeigen Aufstieg oder Abrutschen."
-        )
-        st.plotly_chart(chart_quintil_bahn(df_story, sel_kreis), use_container_width=True)
-
-    st.divider()
-
     # ── Lohnverlauf im Kontext ───────────────────────────────────────────────
     st.subheader("Lohnverlauf im Quintil-Kontext")
     if is_multi:
@@ -1893,6 +1875,24 @@ elif seite == "Kreis-Story":
             "bei diesem Merkmal. Platz 1 = höchster Lohn deutschlandweit."
         )
         st.plotly_chart(chart_rang_sparkline(df_story, sel_kreis), use_container_width=True)
+
+    st.divider()
+
+    # ── Quintil-Bahn ─────────────────────────────────────────────────────────
+    st.subheader("Quintil-Bahn")
+    if is_multi:
+        st.caption(
+            "Jeder Kreis hat eine eigene Trajektorie. Sprünge zwischen den "
+            "horizontalen Bahnen zeigen Aufstieg oder Abrutschen. Linien werden "
+            "leicht vertikal versetzt, damit überlappende Verläufe sichtbar bleiben."
+        )
+        st.plotly_chart(chart_quintil_bahn_multi(stories), use_container_width=True)
+    else:
+        st.caption(
+            "Jeder Punkt markiert das Quintil, in dem der Kreis im jeweiligen Jahr "
+            "lag. Sprünge zwischen den Bahnen zeigen Aufstieg oder Abrutschen."
+        )
+        st.plotly_chart(chart_quintil_bahn(df_story, sel_kreis), use_container_width=True)
 
     st.divider()
     # Download: alle ausgewählten Kreise konkateniert

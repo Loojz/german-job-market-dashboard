@@ -588,6 +588,56 @@ def _parse_xlsm_16_2(path: str, jahr: int) -> pd.DataFrame:
     return pd.DataFrame(records)
 
 
+# Gebietsreform-Harmonisierung: alte AGS → aktueller Gebietsstand.
+# Gleicher Stand wie die BA-ALQ-Kreisdaten (alq_kreise), damit beide
+# Datensätze beim Join übereinstimmen und jede Kreis-Zeitreihe lückenlos ist.
+#   03152 Landkreis Göttingen (alt) + 03156 Osterode am Harz → 03159 Göttingen (2016 fusioniert)
+#   16056 Eisenach, kreisfreie Stadt → 16063 Wartburgkreis (2021 eingegliedert)
+# Beim Median ist das Zusammenlegen eine Näherung (Mediane sind nicht exakt
+# mittelbar); wir behalten den dominanten Nachfolge-/Vorgängerkreis.
+_AGS_HARMONISIERUNG = {
+    "03152": "03159",   # Göttingen (alt) → Göttingen (fusioniert)
+    "03156": None,       # Osterode → in Göttingen aufgegangen (Minor-Fragment, verwerfen)
+    "16056": None,       # Eisenach → in Wartburgkreis 16063 (das alle Jahre hat)
+}
+
+
+def _harmonisiere_gebietsstand(df: pd.DataFrame) -> pd.DataFrame:
+    """Alte Kreis-AGS auf den aktuellen Gebietsstand mappen (siehe _AGS_HARMONISIERUNG)."""
+    df = df.copy()
+    # Minor-Fragmente (Ziel = None) entfernen
+    drop_ags = [a for a, ziel in _AGS_HARMONISIERUNG.items() if ziel is None]
+    if drop_ags:
+        df = df[~df["ags"].isin(drop_ags)].copy()
+    # Vorgänger-AGS auf aktuellen Schlüssel relabeln
+    relabel = {a: z for a, z in _AGS_HARMONISIERUNG.items() if z}
+    if relabel:
+        df["ags"] = df["ags"].replace(relabel)
+    # Falls Relabeling Dubletten erzeugt: dominanten (ersten) Eintrag behalten
+    df = df.drop_duplicates(subset=["ags", "jahr", "merkmal"], keep="first")
+    return df.reset_index(drop=True)
+
+
+def _berechne_quantil_gruppen(df_all: pd.DataFrame) -> pd.DataFrame:
+    """Quantil-Gruppe je Jahr (Basis: Merkmal 'insgesamt') anfügen / neu berechnen."""
+    df_all = df_all.drop(columns=["quantil_gruppe"], errors="ignore")
+    insgesamt = df_all[df_all["merkmal"] == "insgesamt"].copy()
+    result = []
+    for _, g in insgesamt.groupby("jahr"):
+        g = g.copy()
+        cuts = g["median_entgelt"].quantile([0.2, 0.4, 0.6, 0.8])
+        def grp(v):
+            if v <= cuts[0.2]:   return "Ärmste 20%"
+            elif v <= cuts[0.4]: return "Unteres Mittel"
+            elif v <= cuts[0.6]: return "Mittleres Mittel"
+            elif v <= cuts[0.8]: return "Oberes Mittel"
+            else:                return "Reichste 20%"
+        g["quantil_gruppe"] = g["median_entgelt"].apply(grp)
+        result.append(g)
+    insgesamt_mit_gruppe = pd.concat(result)[["ags", "jahr", "quantil_gruppe"]]
+    return df_all.merge(insgesamt_mit_gruppe, on=["ags", "jahr"], how="left")
+
+
 def fetch_entgelt_kreise(data_dir: str = None) -> pd.DataFrame:
     """
     Liest alle vorhandenen Entgelt-Excel-Dateien ein.
@@ -633,25 +683,14 @@ def fetch_entgelt_kreise(data_dir: str = None) -> pd.DataFrame:
     df_all = pd.concat(dfs, ignore_index=True)
     df_all = df_all.drop_duplicates(subset=["ags", "jahr", "merkmal"])
     df_all = df_all.sort_values(["ags", "jahr", "merkmal"]).reset_index(drop=True)
+
+    # Gebietsstand harmonisieren (Göttingen/Osterode, Eisenach) — VOR der
+    # Quantil-Berechnung, damit die Quintil-Grenzen auf dem bereinigten Satz beruhen.
+    df_all = _harmonisiere_gebietsstand(df_all)
     df_all["bundesland"] = df_all["ags"].str[:2].map(BL_MAP)
 
     # Quantil-Gruppen je Jahr (nur für Insgesamt)
-    insgesamt = df_all[df_all["merkmal"] == "insgesamt"].copy()
-    result = []
-    for _, g in insgesamt.groupby("jahr"):
-        g = g.copy()
-        cuts = g["median_entgelt"].quantile([0.2, 0.4, 0.6, 0.8])
-        def grp(v):
-            if v <= cuts[0.2]:   return "Ärmste 20%"
-            elif v <= cuts[0.4]: return "Unteres Mittel"
-            elif v <= cuts[0.6]: return "Mittleres Mittel"
-            elif v <= cuts[0.8]: return "Oberes Mittel"
-            else:                return "Reichste 20%"
-        g["quantil_gruppe"] = g["median_entgelt"].apply(grp)
-        result.append(g)
-
-    insgesamt_mit_gruppe = pd.concat(result)[["ags", "jahr", "quantil_gruppe"]]
-    df_all = df_all.merge(insgesamt_mit_gruppe, on=["ags", "jahr"], how="left")
+    df_all = _berechne_quantil_gruppen(df_all)
 
     df_all["quelle"]       = "BA-Entgeltstatistik (Excel, Stichtag 31.12.)"
     df_all["abgerufen_am"] = date.today().isoformat()
@@ -769,6 +808,33 @@ def ensure_data_exists():
             log.info(f"  ✓ entgelt_kreise.parquet heruntergeladen: {path}")
         except Exception as e:
             log.warning(f"  ⚠ Download fehlgeschlagen: {e}")
+
+    # Gebietsstand harmonisieren — idempotent. Greift auch, wenn das Parquet
+    # von HF (alter Gebietsstand) kommt, sodass das Deployment automatisch
+    # die fusionierten Kreise (Göttingen/Osterode, Eisenach) korrekt führt.
+    _harmonisiere_entgelt_parquet()
+
+
+def _harmonisiere_entgelt_parquet():
+    """Wendet die Gebietsstand-Harmonisierung auf das lokale entgelt-Parquet an,
+       falls noch alte AGS enthalten sind (idempotent)."""
+    entgelt_path = DATA_PROC / "entgelt_kreise.parquet"
+    if not entgelt_path.exists():
+        return
+    try:
+        df = pd.read_parquet(entgelt_path)
+        # Prüfen ob überhaupt noch zu harmonisieren ist (idempotent)
+        if not set(_AGS_HARMONISIERUNG).intersection(df["ags"].unique()):
+            return  # bereits harmonisiert
+        log.info("entgelt_kreise: alter Gebietsstand erkannt → harmonisiere …")
+        df = _harmonisiere_gebietsstand(df)
+        df["bundesland"] = df["ags"].str[:2].map(BL_MAP)
+        df = _berechne_quantil_gruppen(df)
+        df["quelle"]       = df.get("quelle", "BA-Entgeltstatistik (Excel, Stichtag 31.12.)")
+        df.to_parquet(entgelt_path, index=False, engine="pyarrow", compression="snappy")
+        log.info(f"  ✓ harmonisiert: {df['ags'].nunique()} Kreise")
+    except Exception as e:
+        log.warning(f"  ⚠ Harmonisierung übersprungen: {e}")
 
 
 if __name__ == "__main__":
