@@ -65,47 +65,25 @@ st.set_page_config(
     initial_sidebar_state="expanded",
 )
 
-if "dark_mode" not in st.session_state:
-    st.session_state.dark_mode = False
-
-
-def _inject_css(dark: bool) -> None:
-    if dark:
-        app_bg      = "#000000"
-        sidebar_bg  = "#1C1C1E"
-        sidebar_brd = "#2C2C2E"
-        sidebar_txt = "#F5F5F7"
-        sidebar_sub = "#8E8E93"
-        sidebar_hr  = "#3A3A3C"
-        radio_brd   = "#48484A"
-        text        = "#F5F5F7"
-        text2       = "#8E8E93"
-        text3       = "#EBEBF5"
-        heading     = "#F5F5F7"
-        hr_col      = "#3A3A3C"
-        card_bg     = "#1C1C1E"
-        card_txt    = "#EBEBF5"
-        metric_bg   = "#1C1C1E"
-        lit_brd     = "#2C2C2E"
-        source_col  = "#636366"
-    else:
-        app_bg      = "#FFFFFF"
-        sidebar_bg  = "#F5F5F7"
-        sidebar_brd = "#E5E5EA"
-        sidebar_txt = "#1D1D1F"
-        sidebar_sub = "#6E6E73"
-        sidebar_hr  = "#E5E5EA"
-        radio_brd   = "#C7C7CC"
-        text        = "#1D1D1F"
-        text2       = "#6E6E73"
-        text3       = "#3A3A3C"
-        heading     = "#1D1D1F"
-        hr_col      = "#E5E5EA"
-        card_bg     = "#F5F5F7"
-        card_txt    = "#3A3A3C"
-        metric_bg   = "#F5F5F7"
-        lit_brd     = "#F2F2F7"
-        source_col  = "#AEAEB2"
+def _inject_css() -> None:
+    # Festes Light-Design (THWS-Orange auf Weiß)
+    app_bg      = "#FFFFFF"
+    sidebar_bg  = "#F5F5F7"
+    sidebar_brd = "#E5E5EA"
+    sidebar_txt = "#1D1D1F"
+    sidebar_sub = "#6E6E73"
+    sidebar_hr  = "#E5E5EA"
+    radio_brd   = "#C7C7CC"
+    text        = "#1D1D1F"
+    text2       = "#6E6E73"
+    text3       = "#3A3A3C"
+    heading     = "#1D1D1F"
+    hr_col      = "#E5E5EA"
+    card_bg     = "#F5F5F7"
+    card_txt    = "#3A3A3C"
+    metric_bg   = "#F5F5F7"
+    lit_brd     = "#F2F2F7"
+    source_col  = "#AEAEB2"
 
     st.markdown(f"""
 <style>
@@ -282,7 +260,7 @@ section[data-testid="stSidebar"] [data-baseweb="radio"] > div:first-child {{
 """, unsafe_allow_html=True)
 
 
-_inject_css(st.session_state.dark_mode)
+_inject_css()
 
 
 # ─── Hilfsfunktion: Hero-Header ───────────────────────────────────────────────
@@ -369,17 +347,6 @@ with st.sidebar:
 
     start_s = f"{start_j}-01"
     end_s   = f"{end_j}-12"
-
-    st.divider()
-
-    dark_toggle = st.toggle(
-        "Dark Mode",
-        value=st.session_state.dark_mode,
-        key="dm_toggle",
-    )
-    if dark_toggle != st.session_state.dark_mode:
-        st.session_state.dark_mode = dark_toggle
-        st.rerun()
 
     st.divider()
     st.caption(
